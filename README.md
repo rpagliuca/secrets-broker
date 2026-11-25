@@ -1,7 +1,8 @@
 # secrets-broker
 
 A small HTTPS proxy that lets an untrusted client, such as an AI agent, use an
-API credential without ever holding it.
+API credential without ever holding it. It can also proxy SSH, with the same
+rule: the client reaches the machine, the private key stays in the broker.
 
 The client sends its request through the broker with a token of its own. The
 broker checks who is asking and where the request is going, and adds the real
@@ -133,6 +134,7 @@ Unknown fields are rejected.
 | `credentials[].groups` | Client groups allowed to use the credential |
 | `credentials[].scheme` | `bearer`, or `basic` with `username` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
+| `ssh` | Optional. Starts the SSH proxy (see "SSH") |
 
 A host and group pair may be served by one credential only, so there is never
 a choice of which secret to send.
@@ -188,6 +190,94 @@ button per duration plus a refusal, each requiring the phone to be unlocked,
 and reads the answer from the PushWard API. The broker only makes outbound
 requests, and the integration key is a secret of its own store, bound to
 `api.pushward.app`. The notification text passes through PushWard's servers.
+
+## SSH
+
+With an `ssh` block, the broker also listens for SSH. The client connects to
+the broker, gives the name of a target as the user and its token as the
+password, and the broker opens the connection to the target with a private
+key from its store and relays the session.
+
+```json
+"ssh": {
+  "listen": "127.0.0.1:8472",
+  "known_hosts_file": "/run/secrets-broker/ssh_known_hosts",
+  "targets": [
+    {
+      "name": "web",
+      "address": "web.example.com:22",
+      "user": "deploy",
+      "host_keys": ["ssh-ed25519 AAAA..."],
+      "groups": ["team-a"]
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `listen` | Address of the SSH proxy, with an explicit host |
+| `known_hosts_file` | Where the host key of the proxy is written at start-up (a new key at every start) |
+| `targets[].name` | What the client gives as the SSH user, and the secret name unless `secret` is set |
+| `targets[].address` | `host:port` of the target |
+| `targets[].user` | Account on the target |
+| `targets[].host_keys` | Accepted host keys of the target. Required: there is no trust on first use |
+| `targets[].groups` | Client groups allowed to use the target |
+| `targets[].jump` | Optional. Another target to connect through |
+| `targets[].forward` | Optional. `host:port` destinations allowed for `ssh -L` |
+
+The secret of a target is its private key in OpenSSH format, without
+passphrase, bound to the host part of `address`:
+
+```sh
+ssh-keygen -t ed25519 -N '' -C broker-web -f /dev/shm/k    # on the machine that holds the vault key
+jq -Rsc '{value: ., hosts: ["web.example.com"]}' /dev/shm/k \
+  | age -r "$VAULT_PUBLIC_KEY" -o secrets/web.age
+cat /dev/shm/k.pub     # goes into authorized_keys of deploy@web.example.com
+shred -u /dev/shm/k
+```
+
+The client uses the stock `ssh` command. The token is handed over by an
+askpass program, so it is never typed and never on a command line:
+
+```sh
+cat > askpass <<'SH'
+#!/bin/sh
+printf '%s\n' "$BROKER_TOKEN"
+SH
+chmod +x askpass
+
+SSH_ASKPASS=$PWD/askpass SSH_ASKPASS_REQUIRE=force \
+  ssh -p 8472 -o UserKnownHostsFile=/run/secrets-broker/ssh_known_hosts \
+      -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+      web@127.0.0.1 uptime
+```
+
+`scp` and `sftp` work the same way. What is enforced:
+
+- The private key never reaches the client, and signs nothing until the host
+  key of the target matched one of the configured keys.
+- A target of another group gets the same answer as a target that does not
+  exist.
+- With `approval`, a target needs a grant like a credential does (it is named
+  `ssh:<target>` in requests and grants). The first connection is refused
+  with the request id; the target is not contacted before the grant.
+- Open connections are checked again every few seconds. When the grant ends
+  or is revoked, the token stops being valid or the broker is sealed, the
+  connection is closed.
+- A jump target is used by the broker on the way to the final one; the client
+  needs no access to it and gets none.
+- Agent forwarding, X11 forwarding and remote port forwarding (`ssh -R`) are
+  refused. Local forwarding (`ssh -L`) only reaches the destinations listed
+  in `forward`.
+- The audit log has one event per connection, per command (`ssh-exec`, with
+  the command line, cut at 512 bytes), per subsystem and per interactive
+  shell. What is typed inside an interactive shell is not logged.
+
+A grant covers the whole account on the target: the broker does not restrict
+which commands run. To restrict them, use `command=` in `authorized_keys` on
+the target. Do not put secrets on command lines sent through the proxy: they
+end up in the audit log.
 
 ## Secrets
 
@@ -278,7 +368,8 @@ func main() {
 make check   # gofmt, go vet, tests with the race detector, govulncheck
 ```
 
-Dependencies are limited to the standard library and `filippo.io/age`.
+Dependencies are limited to the standard library, `filippo.io/age` and
+`golang.org/x/crypto/ssh`.
 
 ## License
 

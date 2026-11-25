@@ -24,5 +24,27 @@
       "scheme": "bearer",
       "methods": ["GET", "HEAD"]
     }
-  ]
+  ],
+  "ssh": {
+    "listen": "127.0.0.1:8472",
+    "known_hosts_file": "/run/secrets-broker/ssh_known_hosts",
+    "targets": [
+      {
+        "name": "web",
+        "address": "web.example.com:22",
+        "user": "deploy",
+        "host_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"],
+        "groups": ["team-a"],
+        "forward": ["127.0.0.1:5432"]
+      },
+      {
+        "name": "db",
+        "address": "10.0.0.5:22",
+        "user": "postgres",
+        "host_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"],
+        "groups": ["team-a"],
+        "jump": "web"
+      }
+    ]
+  }
 }

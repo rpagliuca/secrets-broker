@@ -32,6 +32,9 @@ type Config struct {
 	Approval *Approval `json:"approval,omitempty"`
 
 	Credentials []Credential `json:"credentials"`
+
+	// SSH, when set, starts the SSH proxy.
+	SSH *SSH `json:"ssh,omitempty"`
 }
 
 // Credential binds one secret to the hosts that receive it and to the groups
@@ -96,7 +99,12 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	if len(c.Credentials) == 0 {
+	if c.SSH != nil {
+		if err := c.SSH.validate(); err != nil {
+			return err
+		}
+	}
+	if len(c.Credentials) == 0 && c.SSH == nil {
 		return fmt.Errorf("no credentials configured")
 	}
 	names := map[string]bool{}

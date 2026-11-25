@@ -17,6 +17,9 @@ type Approver interface {
 	// Authorize returns nil when p holds a grant for the credential. Any
 	// other result is an *ApprovalError.
 	Authorize(p Principal, credential string, hosts []string) error
+	// Granted reports whether a grant is in force, without creating a
+	// request. Long-lived connections use it to notice the end of a grant.
+	Granted(principal, credential string) bool
 }
 
 // Notifier tells the person who approves that a request is waiting, and
@@ -200,6 +203,14 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 		go g.notifier.Notify(ctx, g, req)
 	}
 	return &ApprovalError{RequestID: req.ID}
+}
+
+// Granted implements Approver.
+func (g *Grants) Granted(principal, credential string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.entries[grantKey{principal, credential}]
+	return e != nil && g.now().Before(e.until)
 }
 
 // Decide answers a waiting request: a positive duration grants it for that
