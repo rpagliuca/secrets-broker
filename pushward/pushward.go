@@ -36,6 +36,10 @@ type Notifier struct {
 	Secret string
 	// BaseURL defaults to DefaultBaseURL.
 	BaseURL string
+	// Source is the name the PushWard app shows for these notifications and
+	// groups them under. Defaults to "secrets-broker"; without a source the
+	// app files them as "Unknown".
+	Source string
 	// Level is the interruption level of the notification. Defaults to
 	// "time-sensitive", which gets through a Focus.
 	Level string
@@ -84,6 +88,10 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 		actions = append(actions, action{ID: id, Title: n.allowLabel(d), Unlock: !n.NoUnlock})
 	}
 	title, body := n.text(req)
+	source := n.Source
+	if source == "" {
+		source = "secrets-broker"
+	}
 	level := n.Level
 	if level == "" {
 		level = "time-sensitive"
@@ -94,6 +102,7 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 	}
 	err = n.call(ctx, key, http.MethodPost, "/notifications", notification{
 		Title: title, Body: body, Level: level, CollapseID: req.ID, Actions: actions,
+		Source: "secrets-broker", SourceName: source,
 	}, &sent)
 	if err != nil {
 		return err
@@ -140,6 +149,8 @@ type notification struct {
 	Level      string   `json:"level"`
 	CollapseID string   `json:"collapse_id"`
 	Actions    []action `json:"actions"`
+	Source     string   `json:"source"`
+	SourceName string   `json:"source_display_name"`
 }
 
 type action struct {
