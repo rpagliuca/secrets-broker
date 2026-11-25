@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -561,5 +562,33 @@ func TestConfigurationIsReplacedWhileRunning(t *testing.T) {
 	c := s.mustDial("renamed", "token-a")
 	if _, err := c.NewSession(); err == nil || !strings.Contains(err.Error(), "cannot open") {
 		t.Fatalf("err = %v (the renamed target has no secret)", err)
+	}
+}
+
+func TestReloadKeepsTheCAOfKnownHosts(t *testing.T) {
+	h := newHarness(t, Credential{}, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
+	old := h.client("token-a") // trusts the CA as it was before the reload
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.Credentials = append(slices.Clone(cfg.Credentials),
+		Credential{Name: "other", Hosts: []string{"other.example.com"}, Groups: []string{"team-a"}, Scheme: "bearer"})
+	before := string(h.srv.CACertPEM())
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	if after := string(h.srv.CACertPEM()); !strings.HasPrefix(after, before) || after == before {
+		t.Fatal("the certificate file must keep the old CA and gain one for the new host")
+	}
+	resp, err := old.Get("https://" + goodHost + "/")
+	if err != nil {
+		t.Fatalf("a client from before the reload stopped working: %v", err)
+	}
+	resp.Body.Close()
+	if err := h.srv.SetConfig(&next); err != nil || string(h.srv.CACertPEM()) != before+strings.TrimPrefix(string(h.srv.CACertPEM()), before) {
+		t.Fatal(err)
+	}
+	n := strings.Count(string(h.srv.CACertPEM()), "BEGIN CERTIFICATE")
+	if h.srv.SetConfig(&next); strings.Count(string(h.srv.CACertPEM()), "BEGIN CERTIFICATE") != n || n != 2 {
+		t.Fatalf("%d CA certificates, want 2 and no new one for an unchanged host list", n)
 	}
 }

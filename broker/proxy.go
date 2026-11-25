@@ -25,7 +25,7 @@ var errHostNotBound = errors.New("the secret is not bound to this host")
 type Server struct {
 	mu    sync.RWMutex // guards cfg and ca, replaced together by SetConfig
 	cfg   *Config
-	ca    *authority
+	ca    *authorities
 	store Store
 	auth  Authenticator
 	audit Auditor
@@ -52,7 +52,7 @@ func NewServer(cfg *Config, store Store, auth Authenticator, audit Auditor) (*Se
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	ca, err := newAuthority(cfg.hosts())
+	ca, err := (&authorities{}).extend(cfg.hosts())
 	if err != nil {
 		return nil, err
 	}
@@ -76,26 +76,26 @@ func NewServer(cfg *Config, store Store, auth Authenticator, audit Auditor) (*Se
 // CACertPEM returns the certificate clients must trust.
 func (s *Server) CACertPEM() []byte { _, ca := s.state(); return ca.pem }
 
-func (s *Server) state() (*Config, *authority) {
+func (s *Server) state() (*Config, *authorities) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg, s.ca
 }
 
-// SetConfig replaces the credentials while the server runs. The CA is
-// constrained to the configured hosts, so it is replaced too: clients must
-// read the new certificate. Tunnels opened before the change stop being
-// served and have to be opened again.
+// SetConfig replaces the credentials while the server runs. Hosts that were
+// already configured keep their CA, so clients that trusted it keep working;
+// new hosts get one more CA, added to the certificate file. Tunnels opened
+// before the change stop being served and have to be opened again.
 func (s *Server) SetConfig(cfg *Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	ca, err := newAuthority(cfg.hosts())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ca, err := s.ca.extend(cfg.hosts())
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.cfg, s.ca = cfg, ca
 	return nil
 }

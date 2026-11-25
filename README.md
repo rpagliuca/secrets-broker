@@ -144,9 +144,11 @@ a choice of which secret to send.
 
 `SIGHUP` re-reads the secrets directory (with the key already in memory), the
 tokens file and the configuration: credentials and SSH targets are replaced
-without a restart, so the broker stays unsealed. The CA is constrained to the
-configured hosts, so it is replaced as well and `ca_cert_file` is rewritten;
-tunnels opened before the reload must be opened again. Listen addresses, the
+without a restart, so the broker stays unsealed. Hosts already configured keep
+their CA, so a client that read `ca_cert_file` before the reload keeps
+working; new hosts get one more CA, appended to the file, which a
+long-running client only trusts after reading the file again. Tunnels opened
+before the reload must be opened again. Listen addresses, the
 control socket, the approval settings and adding or removing the `ssh` block
 only change with a restart, and a restart leaves the broker sealed.
 
