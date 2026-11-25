@@ -54,7 +54,28 @@ func Run(ctx context.Context, o Options) error {
 		srv.Approver = ctl.Grants
 	}
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
+	if o.Config.SSH != nil {
+		sp, err := NewSSHProxy(o.Config.SSH, o.Store, o.Auth, o.Audit)
+		if err != nil {
+			return err
+		}
+		if ctl.Grants != nil {
+			sp.Approver = ctl.Grants
+		}
+		sl, err := net.Listen("tcp", o.Config.SSH.Listen)
+		if err != nil {
+			return err
+		}
+		defer sl.Close()
+		if f := o.Config.SSH.KnownHostsFile; f != "" {
+			if err := os.WriteFile(f, sp.KnownHosts(sl.Addr().String()), 0o644); err != nil {
+				return err
+			}
+		}
+		go func() { errc <- sp.Serve(sl) }()
+		log.Printf("secrets-broker SSH proxy listening on %s", sl.Addr())
+	}
 	if o.Config.ControlSocket != "" {
 		cl, err := ListenControl(o.Config.ControlSocket)
 		if err != nil {
