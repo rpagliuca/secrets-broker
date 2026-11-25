@@ -116,6 +116,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.aws(w, r)
 	case r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/commands/"):
 		s.command(w, r)
+	case r.URL.Host == "" && (r.URL.Path == "/grants" || r.URL.Path == "/requests"):
+		s.access(w, r)
 	default:
 		http.Error(w, "secrets-broker: only CONNECT is supported", http.StatusMethodNotAllowed)
 	}

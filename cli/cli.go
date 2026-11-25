@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,8 @@ const usage = `usage: secrets-broker <command> [flags]
   serve   -config FILE [-no-mlock]   run the proxy (starts sealed)
   token                              print a new client token and its SHA-256
   aws-credentials ACCOUNT            print temporary AWS credentials (for credential_process)
+  access                             list what this client may ask for and what it holds
+  request [-for 4h] NAME...          ask ahead, in one question, for what a task needs
 
 Commands sent to the control socket (-socket PATH):
 
@@ -106,6 +109,44 @@ func Main(customize Customize) {
 			log.Fatal(strings.TrimSpace(string(body)))
 		}
 		os.Stdout.Write(body)
+	case "request", "access":
+		// "access" lists what the client may ask for and holds; "request"
+		// asks ahead for several credentials in one question.
+		addr := fs.String("url", "http://127.0.0.1:8471", "address of the broker")
+		env := fs.String("token-env", "SECRETS_BROKER_TOKEN", "environment variable that holds the client token")
+		d := fs.String("for", "", "how long the credentials are needed, such as 4h (a suggestion to the approver)")
+		fs.Parse(args)
+		method, path, body := http.MethodGet, "/grants", ""
+		if cmd == "request" {
+			if fs.NArg() == 0 {
+				log.Fatal("usage: secrets-broker request [-for 4h] NAME...")
+			}
+			quoted := make([]string, fs.NArg())
+			for i, n := range fs.Args() {
+				quoted[i] = strconv.Quote(n)
+			}
+			method, path = http.MethodPost, "/requests"
+			body = `{"credentials":[` + strings.Join(quoted, ",") + `]`
+			if *d != "" {
+				body += `,"duration":` + strconv.Quote(*d)
+			}
+			body += "}"
+		}
+		req, err := http.NewRequest(method, *addr+path, strings.NewReader(body))
+		if err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+os.Getenv(*env))
+		client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			log.Fatal(strings.TrimSpace(string(out)))
+		}
+		os.Stdout.Write(out)
 	case "token":
 		raw := make([]byte, 32)
 		rand.Read(raw)
