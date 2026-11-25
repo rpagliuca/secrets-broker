@@ -132,9 +132,12 @@ Unknown fields are rejected.
 | `credentials[].name` | Name in the audit log, and the secret name unless `secret` is set |
 | `credentials[].hosts` | Exact, lower-case host names; no wildcard, no port |
 | `credentials[].groups` | Client groups allowed to use the credential |
-| `credentials[].scheme` | `bearer`, or `basic` with `username` |
+| `credentials[].scheme` | `bearer`, `basic` with `username`, or `oauth2` with `token_url` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
+| `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
 | `ssh` | Optional. Starts the SSH proxy (see "SSH") |
+| `aws` | Optional. Temporary AWS credentials (see "Temporary AWS credentials") |
+| `commands`, `commands_dir` | Optional. Programs run for clients (see "Commands") |
 
 A host and group pair may be served by one credential only, so there is never
 a choice of which secret to send.
@@ -283,6 +286,73 @@ A grant covers the whole account on the target: the broker does not restrict
 which commands run. To restrict them, use `command=` in `authorized_keys` on
 the target. Do not put secrets on command lines sent through the proxy: they
 end up in the audit log.
+
+## Temporary AWS credentials
+
+AWS requests are signed, not sent with a header, so the broker does not proxy
+them. It holds a long-term access key and hands out sessions that expire.
+
+```json
+"aws": [
+  {"name": "prod", "groups": ["team-a"], "region": "us-east-1", "max_duration": "1h"}
+]
+```
+
+The secret is `ACCESS_KEY_ID:SECRET_ACCESS_KEY`, bound to the STS host of the
+region (`sts.us-east-1.amazonaws.com`). `GET /aws/prod` with
+`Authorization: Bearer <token>` answers in the `credential_process` format,
+after the same checks as a credential (group, grant named `aws:prod`). With
+`role_arn` the broker calls `AssumeRole`; without it, `GetSessionToken`.
+
+```ini
+[profile prod]
+credential_process = /usr/local/bin/secrets-broker aws-credentials -token-env BROKER_TOKEN prod
+```
+
+Unlike a proxied credential, the client holds what it receives until it
+expires. The session lasts at most `max_duration` (default 1h) and ends with
+the grant, but never lasts under 15 minutes, the shortest STS issues: a
+revoked client keeps its session for up to that long.
+
+## OAuth
+
+With `"scheme": "oauth2"` and a `token_url`, the secret is
+`{"client_id", "client_secret", "refresh_token"}`, bound to the API hosts and
+to the host of `token_url`. The broker exchanges the refresh token for an
+access token, keeps it in memory until it expires and sends it as `Bearer`.
+The client holds neither token; give it a placeholder.
+
+## Commands
+
+For what is neither a header nor SSH, such as a VPN, the broker can run a
+program for the client.
+
+```json
+"commands_dir": "/run/secrets-broker/commands",
+"commands": [
+  {
+    "name": "vpn",
+    "groups": ["team-a"],
+    "files": [{"secret": "vpn-config", "name": "client.ovpn"}],
+    "start": ["/usr/local/bin/vpn-up", "{dir}/client.ovpn"],
+    "stop": ["/usr/local/bin/vpn-down"]
+  }
+]
+```
+
+`POST /commands/vpn/start` (with `Authorization: Bearer <token>`) checks the
+group and the grant (`command:vpn`), writes each secret to a file under
+`commands_dir/vpn` (mode 0600; `{dir}` in arguments and `env`), runs `start`
+and returns its output with the secrets blanked. `POST /commands/vpn/stop`
+runs `stop` and removes the files; `GET /commands/vpn` reports the state. The
+broker stops the command by itself when the grant or the token of the client
+ends, when it is sealed and when it shuts down. Each secret must be bound to
+the host `command:vpn`.
+
+The program and its arguments come only from the configuration. They run as
+the broker user, and whatever can read `commands_dir` or the process started
+by `start` can read the secret: this mechanism protects less than the
+proxies and is only as tight as the program it runs.
 
 ## Secrets
 

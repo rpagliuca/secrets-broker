@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,6 +35,15 @@ type Config struct {
 
 	Credentials []Credential `json:"credentials"`
 
+	// AWS lists the accounts for which clients can obtain temporary
+	// credentials.
+	AWS []AWSAccount `json:"aws,omitempty"`
+
+	// Commands are programs the broker runs for clients, with secrets
+	// written to CommandsDir while they run.
+	Commands    []Command `json:"commands,omitempty"`
+	CommandsDir string    `json:"commands_dir,omitempty"`
+
 	// SSH, when set, starts the SSH proxy.
 	SSH *SSH `json:"ssh,omitempty"`
 }
@@ -48,10 +59,15 @@ type Credential struct {
 	Hosts []string `json:"hosts"`
 	// Groups are the client groups allowed to use the credential.
 	Groups []string `json:"groups"`
-	// Scheme is "bearer" (Authorization: Bearer <secret>) or "basic"
-	// (Authorization: Basic base64(username:secret)).
+	// Scheme is "bearer" (Authorization: Bearer <secret>), "basic"
+	// (Authorization: Basic base64(username:secret)) or "oauth2" (the
+	// secret is {"client_id","client_secret","refresh_token"}; the broker
+	// obtains an access token at TokenURL and sends it as Bearer).
 	Scheme   string `json:"scheme"`
 	Username string `json:"username,omitempty"`
+	// TokenURL is the OAuth token endpoint, for scheme oauth2. The secret
+	// must be bound to its host too.
+	TokenURL string `json:"token_url,omitempty"`
 	// Methods, when set, restricts the HTTP methods (for example GET and
 	// HEAD for a read-only credential).
 	Methods []string `json:"methods,omitempty"`
@@ -104,7 +120,27 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	if len(c.Credentials) == 0 && c.SSH == nil {
+	awsNames := map[string]bool{}
+	for i := range c.AWS {
+		if err := c.AWS[i].validate(); err != nil {
+			return err
+		}
+		if awsNames[c.AWS[i].Name] {
+			return fmt.Errorf("aws account %q: duplicate name", c.AWS[i].Name)
+		}
+		awsNames[c.AWS[i].Name] = true
+	}
+	cmdNames := map[string]bool{}
+	for i := range c.Commands {
+		if err := c.Commands[i].validate(); err != nil {
+			return err
+		}
+		if cmdNames[c.Commands[i].Name] || !filepath.IsAbs(c.CommandsDir) {
+			return fmt.Errorf("command %q: duplicate name, or commands_dir is not an absolute path", c.Commands[i].Name)
+		}
+		cmdNames[c.Commands[i].Name] = true
+	}
+	if len(c.Credentials) == 0 && c.SSH == nil && len(c.AWS) == 0 {
 		return fmt.Errorf("no credentials configured")
 	}
 	names := map[string]bool{}
@@ -130,8 +166,16 @@ func (c *Config) Validate() error {
 			if cr.Username == "" || strings.Contains(cr.Username, ":") {
 				return fmt.Errorf("credential %q: scheme basic needs a username without ':'", cr.Name)
 			}
+		case "oauth2":
+			u, err := url.Parse(cr.TokenURL)
+			if err != nil || u.Scheme != "https" || !hostRE.MatchString(u.Host) || cr.Username != "" {
+				return fmt.Errorf("credential %q: scheme oauth2 needs an https token_url and no username", cr.Name)
+			}
 		default:
-			return fmt.Errorf("credential %q: scheme must be bearer or basic", cr.Name)
+			return fmt.Errorf("credential %q: scheme must be bearer, basic or oauth2", cr.Name)
+		}
+		if cr.Scheme != "oauth2" && cr.TokenURL != "" {
+			return fmt.Errorf("credential %q: token_url is only used with scheme oauth2", cr.Name)
 		}
 		if len(cr.Hosts) == 0 || len(cr.Groups) == 0 {
 			return fmt.Errorf("credential %q: needs at least one host and one group", cr.Name)
