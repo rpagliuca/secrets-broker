@@ -4,6 +4,11 @@
   "ca_cert_file": "/run/secrets-broker/ca.pem",
   "secrets_dir": "/etc/secrets-broker/secrets",
   "tokens_file": "/etc/secrets-broker/tokens.json",
+  "approval": {
+    "durations": ["1h", "4h", "12h"],
+    "request_ttl": "10m",
+    "cooldown": "10m"
+  },
   "credentials": [
     {
       "name": "issues-team-a",

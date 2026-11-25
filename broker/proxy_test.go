@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 const (
@@ -531,18 +532,48 @@ func TestControlSocket(t *testing.T) {
 	}
 	defer l.Close()
 	u := &fakeUnsealer{}
-	go ServeControl(l, u, func() bool { return u.key == "" })
+	grants := NewGrants(Approval{Durations: []Duration{Duration(time.Hour)}}, nil, nil)
+	ctl := &Control{Unsealer: u, Sealed: func() bool { return u.key == "" }, Grants: grants}
+	go ctl.Serve(l)
 
-	if _, err := Control(path, "unseal", strings.NewReader("wrong\n")); err == nil {
+	if _, err := ControlRequest(path, "unseal", strings.NewReader("wrong\n")); err == nil {
 		t.Error("wrong key accepted")
 	}
-	if reply, err := Control(path, "status", nil); err != nil || reply != "ok: sealed=true" {
+	if reply, err := ControlRequest(path, "status", nil); err != nil || reply != "ok: sealed=true" {
 		t.Errorf("status = %q, %v", reply, err)
 	}
-	if reply, err := Control(path, "unseal", strings.NewReader("right-key\n")); err != nil || !strings.Contains(reply, "3 secrets") {
+	if reply, err := ControlRequest(path, "unseal", strings.NewReader("right-key\n")); err != nil || !strings.Contains(reply, "3 secrets") {
 		t.Errorf("unseal = %q, %v", reply, err)
 	}
-	if reply, err := Control(path, "seal", nil); err != nil || u.key != "" {
+	if reply, err := ControlRequest(path, "seal", nil); err != nil || u.key != "" {
 		t.Errorf("seal = %q, %v", reply, err)
+	}
+
+	// A request shows up in "pending" and is answered with "approve".
+	p := Principal{ID: "agent-a", Name: "fix the build"}
+	var pending *ApprovalError
+	if err := grants.Authorize(p, "svc", []string{goodHost}); !errors.As(err, &pending) || pending.RequestID == "" {
+		t.Fatalf("first use = %v, want a waiting request", err)
+	}
+	if reply, err := ControlRequest(path, "pending", nil); err != nil || !strings.Contains(reply, pending.RequestID) || !strings.Contains(reply, `"fix the build"`) {
+		t.Errorf("pending = %q, %v", reply, err)
+	}
+	if _, err := ControlRequest(path, "approve "+pending.RequestID+" 0s", nil); err == nil {
+		t.Error("approve with a zero duration accepted")
+	}
+	if reply, err := ControlRequest(path, "approve "+pending.RequestID+" 30m", nil); err != nil {
+		t.Errorf("approve = %q, %v", reply, err)
+	}
+	if err := grants.Authorize(p, "svc", nil); err != nil {
+		t.Errorf("after approve: %v", err)
+	}
+	if reply, err := ControlRequest(path, "grants", nil); err != nil || !strings.Contains(reply, "agent-a") {
+		t.Errorf("grants = %q, %v", reply, err)
+	}
+	if reply, err := ControlRequest(path, "revoke all", nil); err != nil || reply != "ok: 1 grants revoked" {
+		t.Errorf("revoke = %q, %v", reply, err)
+	}
+	if err := grants.Authorize(p, "svc", nil); err == nil {
+		t.Error("grant still valid after revoke")
 	}
 }

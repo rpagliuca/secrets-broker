@@ -21,6 +21,10 @@ type Options struct {
 	Store  Store // also an Unsealer when it starts sealed
 	Auth   Authenticator
 	Audit  Auditor
+	// Notifier delivers approval requests to a person. Used only when the
+	// configuration has an approval block; without a Notifier, requests are
+	// answered through the control socket.
+	Notifier Notifier
 	// NoMlock skips mlockall. For development only: pages with secrets may
 	// then reach swap.
 	NoMlock bool
@@ -43,14 +47,21 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}
 
+	ctl := &Control{Sealed: srv.Sealed}
+	ctl.Unsealer, _ = o.Store.(Unsealer)
+	if o.Config.Approval != nil {
+		ctl.Grants = NewGrants(*o.Config.Approval, o.Notifier, o.Audit)
+		srv.Approver = ctl.Grants
+	}
+
 	errc := make(chan error, 2)
-	if u, ok := o.Store.(Unsealer); ok && o.Config.ControlSocket != "" {
+	if o.Config.ControlSocket != "" {
 		cl, err := ListenControl(o.Config.ControlSocket)
 		if err != nil {
 			return err
 		}
 		defer cl.Close()
-		go func() { errc <- ServeControl(cl, u, srv.Sealed) }()
+		go func() { errc <- ctl.Serve(cl) }()
 	}
 
 	l, err := net.Listen("tcp", o.Config.Listen)

@@ -29,6 +29,9 @@ type Server struct {
 	audit Auditor
 	ca    *authority
 
+	// Approver, when set, must authorise each client for each credential.
+	Approver Approver
+
 	// Transport performs the upstream requests. It must verify TLS and must
 	// not follow redirects (an http.RoundTripper never does). Replaced only
 	// in tests.
@@ -121,6 +124,10 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		deny(statusFor(err), err.Error())
 		return
 	}
+	if err := s.approved(p, cred); err != nil {
+		deny(http.StatusForbidden, err.Error())
+		return
+	}
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -211,6 +218,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		deny(statusFor(err), err.Error())
 		return
 	}
+	if err := s.approved(p, cred); err != nil {
+		deny(http.StatusForbidden, err.Error())
+		return
+	}
 	authz := cred.authorization(secret.Value)
 	needles := [][]byte{secret.Value}
 	if cred.Scheme == "basic" {
@@ -275,6 +286,15 @@ func (s *Server) secretFor(cred *Credential, host string) (Secret, error) {
 		return Secret{}, errors.New("secret is too short")
 	}
 	return sec, nil
+}
+
+// approved asks the Approver, when there is one. A grant can end while a
+// tunnel is open, so this runs on every request.
+func (s *Server) approved(p Principal, cred *Credential) error {
+	if s.Approver == nil {
+		return nil
+	}
+	return s.Approver.Authorize(p, cred.Name, cred.Hosts)
 }
 
 func statusFor(err error) int {

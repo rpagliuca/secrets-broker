@@ -29,6 +29,7 @@ type StaticTokens struct {
 
 type staticToken struct {
 	ID      string     `json:"id"`
+	Name    string     `json:"name,omitempty"`
 	SHA256  string     `json:"sha256"`
 	Groups  []string   `json:"groups"`
 	Expires *time.Time `json:"expires,omitempty"`
@@ -79,5 +80,5 @@ func (t *StaticTokens) Authenticate(_ context.Context, token string) (Principal,
 	if tok.Expires != nil && time.Now().After(*tok.Expires) {
 		return Principal{}, errors.New("expired token")
 	}
-	return Principal{ID: tok.ID, Groups: tok.Groups}, nil
+	return Principal{ID: tok.ID, Groups: tok.Groups, Name: tok.Name}, nil
 }
