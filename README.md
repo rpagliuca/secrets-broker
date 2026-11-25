@@ -383,6 +383,13 @@ answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
 `aws:<account>` and `command:<name>`. The client names things and suggests a
 duration; it cannot add text of its own to the question.
 
+By default the first use of a credential without a grant creates the
+request. With `"explicit_only": true` in `approval`, a use without a grant is
+just refused and nobody is notified: requests only come from the client
+asking (see "Asking ahead"). Use it when clients run tools that touch a
+service on their own (a status poller, a server that lists its resources at
+start-up), which would otherwise cause requests nobody made.
+
 ## Open credentials
 
 Some things are meant for every client, and are still worth keeping in the

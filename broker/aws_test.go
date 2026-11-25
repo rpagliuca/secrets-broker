@@ -544,3 +544,42 @@ func TestOpenCredentialNeedsNoApprovalButIsLogged(t *testing.T) {
 		t.Fatal("an unknown open name was accepted")
 	}
 }
+
+func TestExplicitOnlyNeverAsksOnUse(t *testing.T) {
+	h, _ := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.Approval = &Approval{Durations: []Duration{Duration(time.Hour)}, ExplicitOnly: true}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(*next.Approval, n, h.audit)
+	sv := &services{cfg: func() *Config { c, _ := h.srv.state(); return c }, auth: h.srv.auth, inner: g}
+	h.srv.auth, h.srv.Approver = sv, sv
+
+	// A use without a grant is refused and asks nobody.
+	if code, body := h.aws("prod", "token-a"); code != 403 || !strings.Contains(body, "ask first") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if _, resp := h.tunnel(goodHost, "token-a"); resp.StatusCode != 403 {
+		t.Fatalf("tunnel: %d", resp.StatusCode)
+	}
+	if len(n.ch) != 0 || len(g.Pending()) != 0 {
+		t.Fatalf("%d notifications, %d pending", len(n.ch), len(g.Pending()))
+	}
+	// Asking is the only way; after the answer the use works.
+	req, _ := http.NewRequest("POST", h.broker.URL+"/requests", strings.NewReader(`{"credentials":["aws:prod"],"duration":"1h"}`))
+	req.Header.Set("Authorization", "Bearer token-a")
+	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != 200 {
+		t.Fatalf("%v %v", r, err)
+	}
+	asked := <-n.ch
+	if code, _ := h.aws("prod", "token-a"); code != 403 || len(n.ch) != 0 {
+		t.Fatalf("while waiting: %d, %d more notifications", code, len(n.ch))
+	}
+	g.Decide(asked.ID, time.Hour, "test")
+	if code, body := h.aws("prod", "token-a"); code != 200 {
+		t.Fatalf("after the grant: %d %s", code, body)
+	}
+}

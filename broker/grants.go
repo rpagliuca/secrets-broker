@@ -86,6 +86,12 @@ type Approval struct {
 	// still go through the broker: the secret stays in it and each use is
 	// in the audit log.
 	Open []string `json:"open,omitempty"`
+	// ExplicitOnly stops a use without a grant from asking the approver:
+	// it is refused and nobody is notified. Requests then only come from
+	// the client asking (POST /requests). Background tools that touch a
+	// service on their own, such as a status poller or a server listing
+	// its resources at start-up, no longer cause requests nobody made.
+	ExplicitOnly bool `json:"explicit_only,omitempty"`
 }
 
 // Duration is a time.Duration written as a string ("90m") in JSON.

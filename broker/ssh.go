@@ -408,7 +408,7 @@ func (p *SSHProxy) serveCommand(conn ssh.Conn, chans <-chan ssh.NewChannel, who 
 func sshReason(err error) (client, detail string) {
 	var ae *ApprovalError
 	switch {
-	case errors.As(err, &ae), errors.Is(err, ErrSealed):
+	case errors.As(err, &ae), errors.Is(err, ErrSealed), errors.Is(err, ErrNotGranted):
 		return err.Error(), err.Error()
 	}
 	return "the broker cannot open this target", err.Error()
