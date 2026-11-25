@@ -1,0 +1,23 @@
+{
+  "listen": "127.0.0.1:8471",
+  "control_socket": "/run/secrets-broker/control.sock",
+  "ca_cert_file": "/run/secrets-broker/ca.pem",
+  "secrets_dir": "/etc/secrets-broker/secrets",
+  "tokens_file": "/etc/secrets-broker/tokens.json",
+  "credentials": [
+    {
+      "name": "issues-team-a",
+      "hosts": ["issues.example.com"],
+      "groups": ["team-a"],
+      "scheme": "basic",
+      "username": "bot@example.com"
+    },
+    {
+      "name": "code-readonly",
+      "hosts": ["api.code.example.com", "code.example.com"],
+      "groups": ["team-a", "team-b"],
+      "scheme": "bearer",
+      "methods": ["GET", "HEAD"]
+    }
+  ]
+}
