@@ -221,3 +221,7 @@ make check   # gofmt, go vet, tests with the race detector, govulncheck
 ```
 
 Dependencies are limited to the standard library and `filippo.io/age`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
