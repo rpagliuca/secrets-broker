@@ -1,0 +1,257 @@
+// Package pushward delivers approval requests to a phone through PushWard
+// (https://pushward.app) and brings the answer back.
+//
+// The broker sends a notification with one button per choice and then reads
+// the answer from the PushWard API. Nothing calls the broker: it only needs
+// outbound HTTPS. The integration key comes from the broker's own store, so
+// clients of the broker never hold it and cannot forge an answer.
+package pushward
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/rpagliuca/secrets-broker/broker"
+)
+
+// DefaultBaseURL is the PushWard API.
+const DefaultBaseURL = "https://api.pushward.app"
+
+// Notifier implements broker.Notifier.
+type Notifier struct {
+	// Store and Secret locate the PushWard integration key. The secret must
+	// be bound to the API host, like any other.
+	Store  broker.Store
+	Secret string
+	// BaseURL defaults to DefaultBaseURL.
+	BaseURL string
+	// Level is the interruption level of the notification. Defaults to
+	// "time-sensitive", which gets through a Focus.
+	Level string
+	// NoUnlock drops the requirement to unlock the phone (Face ID, Touch ID
+	// or passcode) before a button counts.
+	NoUnlock bool
+	// Text writes the notification. The default is in English.
+	Text func(req broker.Request) (title, body string)
+	// Deny and Allow label the buttons. The defaults are "Deny" and the
+	// duration, such as "4 h".
+	Deny  string
+	Allow func(d time.Duration) string
+	// Client defaults to a client that ignores proxy settings.
+	Client *http.Client
+}
+
+// Notify implements broker.Notifier: it asks, waits for the answer and
+// reports it to g. It returns when ctx ends, which is when the request was
+// answered or expired.
+func (n *Notifier) Notify(ctx context.Context, g *broker.Grants, req broker.Request) {
+	if err := n.ask(ctx, g, req); err != nil && ctx.Err() == nil {
+		log.Printf("pushward: request %s: %v", req.ID, err)
+	}
+}
+
+func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request) error {
+	key, err := n.key()
+	if err != nil {
+		return err
+	}
+	choices := map[string]time.Duration{"deny": 0}
+	actions := []action{{ID: "deny", Title: n.denyLabel(), Destructive: true, Unlock: !n.NoUnlock}}
+	for _, d := range g.Durations() {
+		id := "allow-" + strconv.FormatInt(int64(d/time.Second), 10)
+		choices[id] = d
+		actions = append(actions, action{ID: id, Title: n.allowLabel(d), Unlock: !n.NoUnlock})
+	}
+	title, body := n.text(req)
+	level := n.Level
+	if level == "" {
+		level = "time-sensitive"
+	}
+	var sent struct {
+		ID         json.Number `json:"id"`
+		Answerable bool        `json:"answerable"`
+	}
+	err = n.call(ctx, key, http.MethodPost, "/notifications", notification{
+		Title: title, Body: body, Level: level, CollapseID: req.ID, Actions: actions,
+	}, &sent)
+	if err != nil {
+		return err
+	}
+	if sent.ID == "" || !sent.Answerable {
+		return errors.New("the notification was accepted but its answer will not be recorded")
+	}
+	// Whatever happens, take the notification off the phone at the end: a
+	// stale request must not sit there looking answerable.
+	defer n.retract(key, req.ID)
+
+	for ctx.Err() == nil {
+		var ans struct {
+			Status   string `json:"status"`
+			ActionID string `json:"action_id"`
+		}
+		err := n.call(ctx, key, http.MethodGet, "/notifications/answers/"+url.PathEscape(sent.ID.String())+"?wait=25", nil, &ans)
+		if err != nil {
+			var se *statusError
+			if errors.As(err, &se) && se.code != http.StatusTooManyRequests && se.code < 500 {
+				return err
+			}
+			select { // transient: try again while the request is alive
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+		if ans.Status != "answered" {
+			continue
+		}
+		d, ok := choices[ans.ActionID]
+		if !ok {
+			return fmt.Errorf("unexpected answer %q", ans.ActionID)
+		}
+		return g.Decide(req.ID, d, "pushward")
+	}
+	return ctx.Err()
+}
+
+type notification struct {
+	Title      string   `json:"title"`
+	Body       string   `json:"body"`
+	Level      string   `json:"level"`
+	CollapseID string   `json:"collapse_id"`
+	Actions    []action `json:"actions"`
+}
+
+type action struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Destructive bool   `json:"destructive,omitempty"`
+	Unlock      bool   `json:"authentication_required,omitempty"`
+}
+
+type statusError struct {
+	code int
+	body string
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("PushWard answered %d: %s", e.code, e.body) }
+
+func (n *Notifier) call(ctx context.Context, key, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, n.baseURL()+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := n.Client
+	if client == nil {
+		client = defaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &statusError{resp.StatusCode, string(bytes.TrimSpace(raw))}
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// retract removes the notification from the devices. Best effort.
+func (n *Notifier) retract(key, collapseID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, nil)
+}
+
+// key fetches the integration key and enforces its host binding.
+func (n *Notifier) key() (string, error) {
+	u, err := url.Parse(n.baseURL())
+	if err != nil {
+		return "", err
+	}
+	sec, err := n.Store.Get(n.Secret)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Contains(sec.Hosts, u.Hostname()) {
+		return "", fmt.Errorf("secret %s is not bound to %s", n.Secret, u.Hostname())
+	}
+	return string(sec.Value), nil
+}
+
+func (n *Notifier) baseURL() string {
+	if n.BaseURL != "" {
+		return n.BaseURL
+	}
+	return DefaultBaseURL
+}
+
+func (n *Notifier) text(req broker.Request) (string, string) {
+	if n.Text != nil {
+		return n.Text(req)
+	}
+	who := req.Principal.Name
+	if who == "" {
+		who = req.Principal.ID
+	}
+	return "Credential request", fmt.Sprintf("%s asks for %s (%s)", who, req.Credential, req.Principal.ID)
+}
+
+func (n *Notifier) denyLabel() string {
+	if n.Deny != "" {
+		return n.Deny
+	}
+	return "Deny"
+}
+
+func (n *Notifier) allowLabel(d time.Duration) string {
+	if n.Allow != nil {
+		return n.Allow(d)
+	}
+	return Short(d)
+}
+
+// Short formats a duration for a button: "4 h", "30 min", "1 h 30 min".
+func Short(d time.Duration) string {
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	switch {
+	case m == 0:
+		return fmt.Sprintf("%d h", h)
+	case h == 0:
+		return fmt.Sprintf("%d min", m)
+	}
+	return fmt.Sprintf("%d h %d min", h, m)
+}
+
+var defaultClient = &http.Client{
+	Timeout:   40 * time.Second, // above the 25 s long poll
+	Transport: &http.Transport{Proxy: nil, TLSHandshakeTimeout: 10 * time.Second, IdleConnTimeout: 90 * time.Second},
+}
