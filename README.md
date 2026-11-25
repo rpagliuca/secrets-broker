@@ -182,6 +182,13 @@ implementing `broker.Notifier` and calling `Grants.Decide` with the answer.
 For the approval to count as a second factor, the answer must reach the
 broker through a path the clients cannot write to.
 
+The `pushward` package is one such `Notifier`, for
+[PushWard](https://pushward.app): the broker sends a notification with one
+button per duration plus a refusal, each requiring the phone to be unlocked,
+and reads the answer from the PushWard API. The broker only makes outbound
+requests, and the integration key is a secret of its own store, bound to
+`api.pushward.app`. The notification text passes through PushWard's servers.
+
 ## Secrets
 
 Each secret is one age file whose plaintext is
@@ -245,8 +252,18 @@ type Notifier interface      { Notify(ctx context.Context, g *Grants, req Reques
 ```
 
 A deployment can keep `agestore` and replace the authenticator (for example
-with the session tokens of whatever launches the agents) and the auditor, then
-call `broker.Run`.
+with the session tokens of whatever launches the agents), the auditor and the
+notifier. The `cli` package gives such a binary the same command line:
+
+```go
+func main() {
+	cli.Main(func(cfg *broker.Config, o *broker.Options) error {
+		o.Auth = myAuthenticator{}
+		o.Notifier = &pushward.Notifier{Store: o.Store, Secret: "pushward"}
+		return nil
+	})
+}
+```
 
 ## Not in this version
 
