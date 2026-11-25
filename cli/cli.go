@@ -105,6 +105,9 @@ func serve(configPath string, noMlock bool, customize Customize) error {
 		Store:   agestore.New(cfg.SecretsDir),
 		Audit:   broker.NewJSONAudit(os.Stdout),
 		NoMlock: noMlock,
+		ReloadConfig: func() (*broker.Config, error) {
+			return broker.LoadConfig(configPath)
+		},
 	}
 	if cfg.TokensFile != "" {
 		auth, err := broker.LoadStaticTokens(cfg.TokensFile)

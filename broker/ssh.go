@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -147,7 +148,7 @@ func parseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 
 // SSHProxy is the SSH side of the broker.
 type SSHProxy struct {
-	cfg    *SSH
+	cfg    atomic.Pointer[SSH]
 	store  Store
 	auth   Authenticator
 	audit  Auditor
@@ -189,12 +190,24 @@ func NewSSHProxy(cfg *SSH, store Store, auth Authenticator, audit Auditor) (*SSH
 	if err != nil {
 		return nil, err
 	}
-	return &SSHProxy{
-		cfg: cfg, store: store, auth: auth, audit: audit, signer: signer,
+	p := &SSHProxy{
+		store: store, auth: auth, audit: audit, signer: signer,
 		Dial:    (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 		Recheck: 5 * time.Second,
 		slots:   make(chan struct{}, sshMaxConns),
-	}, nil
+	}
+	p.cfg.Store(cfg)
+	return p, nil
+}
+
+// SetConfig replaces the targets while the proxy runs. Connections already
+// open keep the target they were opened with, until their grant ends.
+func (p *SSHProxy) SetConfig(cfg *SSH) error {
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	p.cfg.Store(cfg)
+	return nil
 }
 
 // HostKey returns the public host key of the proxy.
@@ -248,7 +261,7 @@ func (p *SSHProxy) handle(c net.Conn) {
 				p.audit.Record(Event{Time: time.Now().UTC(), Decision: "denied", Reason: "invalid token", Method: sshConnect})
 				return nil, errors.New(sshDeniedToUser)
 			}
-			t := p.cfg.target(meta.User())
+			t := p.cfg.Load().target(meta.User())
 			if t == nil || !slices.ContainsFunc(t.Groups, func(g string) bool { return slices.Contains(pr.Groups, g) }) {
 				// The same answer for a target that does not exist and for
 				// one of another group: names are not confirmed to clients.
@@ -334,7 +347,7 @@ func (u *upstream) Close() error {
 // open checks the secrets, then the grant, then connects. The order keeps a
 // sealed or misconfigured broker from asking a person for approval.
 func (p *SSHProxy) open(who Principal, t *SSHTarget) (*upstream, error) {
-	hops, err := p.cfg.chain(t)
+	hops, err := p.cfg.Load().chain(t)
 	if err != nil {
 		return nil, err
 	}

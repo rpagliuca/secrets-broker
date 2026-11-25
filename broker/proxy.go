@@ -23,11 +23,12 @@ var errHostNotBound = errors.New("the secret is not bound to this host")
 // Server is the proxy. It is an http.Handler meant to be served over plain
 // HTTP on a loopback address: clients talk to it as an HTTPS proxy.
 type Server struct {
+	mu    sync.RWMutex // guards cfg and ca, replaced together by SetConfig
 	cfg   *Config
+	ca    *authority
 	store Store
 	auth  Authenticator
 	audit Auditor
-	ca    *authority
 
 	// Approver, when set, must authorise each client for each credential.
 	Approver Approver
@@ -65,11 +66,35 @@ func NewServer(cfg *Config, store Store, auth Authenticator, audit Auditor) (*Se
 }
 
 // CACertPEM returns the certificate clients must trust.
-func (s *Server) CACertPEM() []byte { return s.ca.pem }
+func (s *Server) CACertPEM() []byte { _, ca := s.state(); return ca.pem }
+
+func (s *Server) state() (*Config, *authority) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg, s.ca
+}
+
+// SetConfig replaces the credentials while the server runs. The CA is
+// constrained to the configured hosts, so it is replaced too: clients must
+// read the new certificate. Tunnels opened before the change stop being
+// served and have to be opened again.
+func (s *Server) SetConfig(cfg *Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	ca, err := newAuthority(cfg.hosts())
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg, s.ca = cfg, ca
+	return nil
+}
 
 // Sealed reports whether the store is still sealed.
 func (s *Server) Sealed() bool {
-	_, err := s.store.Get(s.cfg.Credentials[0].secretName())
+	_, err := s.store.Get("status")
 	return errors.Is(err, ErrSealed)
 }
 
@@ -114,7 +139,8 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev.Principal, ev.Groups = p.ID, p.Groups
-	cred, reason := s.cfg.credentialFor(host, p.Groups)
+	cfg, ca := s.state()
+	cred, reason := cfg.credentialFor(host, p.Groups)
 	if cred == nil {
 		deny(http.StatusForbidden, reason)
 		return
@@ -153,7 +179,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 			if normalizeHost(hello.ServerName) != host {
 				return nil, fmt.Errorf("SNI %q does not match the tunnel host", hello.ServerName)
 			}
-			return s.ca.leaf(host)
+			return ca.leaf(host)
 		},
 	})
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
@@ -193,7 +219,8 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		return
 	}
 	ev.Principal, ev.Groups = p.ID, p.Groups
-	if again, _ := s.cfg.credentialFor(host, p.Groups); again != cred {
+	cfg, _ := s.state()
+	if again, _ := cfg.credentialFor(host, p.Groups); again != cred {
 		deny(http.StatusForbidden, "this client may no longer use this credential")
 		return
 	}
