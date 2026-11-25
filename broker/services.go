@@ -37,6 +37,9 @@ const servicePrefix = "service:"
 
 var errServiceCredential = errors.New("this service may not use this credential")
 
+// ErrNotGranted refuses a use without a grant when requests are explicit.
+var ErrNotGranted = errors.New("not granted; ask first with POST /requests (secrets-broker request), then retry")
+
 func (c *Config) validateServices() error {
 	ids, sums := map[string]bool{}, map[string]bool{}
 	for _, s := range c.Services {
@@ -114,6 +117,9 @@ func (s *services) Authorize(p Principal, credential string, hosts []string) err
 	}
 	if s.inner == nil || s.open(credential) {
 		return nil
+	}
+	if cfg := s.cfg(); cfg.Approval != nil && cfg.Approval.ExplicitOnly && !s.inner.Granted(p.ID, credential) {
+		return ErrNotGranted
 	}
 	return s.inner.Authorize(p, credential, hosts)
 }
