@@ -349,6 +349,13 @@ broker stops the command by itself when the grant or the token of the client
 ends, when it is sealed and when it shuts down. Each secret must be bound to
 the host `command:vpn`.
 
+What the command makes reachable can be kept behind the broker as well. With
+`"forwards": {"10.0.0.5:5432": "db.sock"}`, the program listens on the Unix
+socket `{dir}/db.sock` instead of a TCP port, and the client reaches it with
+`ssh -L 5432:10.0.0.5:5432 vpn@broker` through the SSH proxy (the SSH user is
+the command name). Only the client that started the command is let in, while
+its grant lasts; a port open on the machine would serve every local process.
+
 The program and its arguments come only from the configuration. They run as
 the broker user, and whatever can read `commands_dir` or the process started
 by `start` can read the secret: this mechanism protects less than the
