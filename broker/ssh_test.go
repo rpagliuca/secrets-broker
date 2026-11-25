@@ -530,3 +530,36 @@ func TestExampleConfigurationLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConfigurationIsReplacedWhileRunning(t *testing.T) {
+	h := newHarness(t, Credential{}, nil)
+	before := string(h.srv.CACertPEM())
+	if _, resp := h.tunnel(goodHost, "token-a"); resp.StatusCode != 200 {
+		t.Fatalf("before: %d", resp.StatusCode)
+	}
+	other := &Config{Credentials: []Credential{{Name: "svc", Hosts: []string{"other.example.com"}, Groups: []string{"team-a"}, Scheme: "bearer"}}}
+	if err := h.srv.SetConfig(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, resp := h.tunnel(goodHost, "token-a"); resp.StatusCode != 403 {
+		t.Fatalf("a host removed from the configuration still answers %d", resp.StatusCode)
+	}
+	if string(h.srv.CACertPEM()) == before {
+		t.Fatal("the CA was not replaced with the hosts")
+	}
+	if err := h.srv.SetConfig(&Config{}); err == nil {
+		t.Fatal("an invalid configuration was accepted")
+	}
+
+	s := newSSHHarness(t, nil)
+	if err := s.proxy.SetConfig(&SSH{Listen: "127.0.0.1:0", Targets: []SSHTarget{func() SSHTarget { x := s.cfg.Targets[0]; x.Name = "renamed"; return x }()}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.dial("web", "token-a"); err == nil {
+		t.Fatal("a target removed from the configuration still connects")
+	}
+	c := s.mustDial("renamed", "token-a")
+	if _, err := c.NewSession(); err == nil || !strings.Contains(err.Error(), "cannot open") {
+		t.Fatalf("err = %v (the renamed target has no secret)", err)
+	}
+}

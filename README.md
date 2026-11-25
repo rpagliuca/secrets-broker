@@ -139,12 +139,17 @@ Unknown fields are rejected.
 A host and group pair may be served by one credential only, so there is never
 a choice of which secret to send.
 
-Changing the configuration requires a restart, and a restart leaves the broker
-sealed. A change of policy therefore only takes effect when the person holding
-the vault key unseals again.
+`SIGHUP` re-reads the secrets directory (with the key already in memory), the
+tokens file and the configuration: credentials and SSH targets are replaced
+without a restart, so the broker stays unsealed. The CA is constrained to the
+configured hosts, so it is replaced as well and `ca_cert_file` is rewritten;
+tunnels opened before the reload must be opened again. Listen addresses, the
+control socket, the approval settings and adding or removing the `ssh` block
+only change with a restart, and a restart leaves the broker sealed.
 
-`SIGHUP` re-reads the secrets directory (with the key already in memory) and
-the tokens file.
+Whoever can write the configuration file and signal the process can therefore
+change the policy without the vault key. Keep the file owned by an account
+the clients cannot use.
 
 ## Approval
 

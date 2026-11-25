@@ -25,6 +25,9 @@ type Options struct {
 	// configuration has an approval block; without a Notifier, requests are
 	// answered through the control socket.
 	Notifier Notifier
+	// ReloadConfig, when set, is called on SIGHUP to read the configuration
+	// again. Credentials and SSH targets are replaced without a restart.
+	ReloadConfig func() (*Config, error)
 	// NoMlock skips mlockall. For development only: pages with secrets may
 	// then reach swap.
 	NoMlock bool
@@ -55,8 +58,9 @@ func Run(ctx context.Context, o Options) error {
 	}
 
 	errc := make(chan error, 3)
+	var sp *SSHProxy
 	if o.Config.SSH != nil {
-		sp, err := NewSSHProxy(o.Config.SSH, o.Store, o.Auth, o.Audit)
+		sp, err = NewSSHProxy(o.Config.SSH, o.Store, o.Auth, o.Audit)
 		if err != nil {
 			return err
 		}
@@ -111,9 +115,55 @@ func Run(ctx context.Context, o Options) error {
 					}
 				}
 			}
+			if o.ReloadConfig != nil {
+				if err := reloadConfig(&o, srv, sp); err != nil {
+					log.Printf("configuration NOT reloaded: %v", err)
+				}
+			}
 			log.Printf("reloaded")
 		}
 	}
+}
+
+// reloadConfig applies a new configuration to the running proxies. What a
+// listener or the approval table was built from only changes with a restart.
+func reloadConfig(o *Options, srv *Server, sp *SSHProxy) error {
+	nc, err := o.ReloadConfig()
+	if err != nil {
+		return err
+	}
+	old := o.Config
+	sshListen := func(c *Config) string {
+		if c.SSH == nil {
+			return ""
+		}
+		return c.SSH.Listen
+	}
+	if nc.Listen != old.Listen || nc.ControlSocket != old.ControlSocket || nc.CACertFile != old.CACertFile ||
+		sshListen(nc) != sshListen(old) || (nc.Approval == nil) != (old.Approval == nil) {
+		return errors.New("listen addresses, control socket, CA file and the presence of ssh or approval only change with a restart")
+	}
+	if nc.SSH != nil {
+		nc.SSH.KnownHostsFile = old.SSH.KnownHostsFile
+		if err := nc.SSH.validate(); err != nil {
+			return err
+		}
+	}
+	if err := srv.SetConfig(nc); err != nil {
+		return err
+	}
+	if nc.CACertFile != "" {
+		if err := os.WriteFile(nc.CACertFile, srv.CACertPEM(), 0o644); err != nil {
+			return err
+		}
+	}
+	if sp != nil {
+		if err := sp.SetConfig(nc.SSH); err != nil {
+			return err
+		}
+	}
+	o.Config = nc
+	return nil
 }
 
 // JSONAudit writes one JSON object per event.
