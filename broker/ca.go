@@ -8,7 +8,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
+	"slices"
 	"sync"
 	"time"
 )
@@ -25,6 +27,52 @@ type authority struct {
 
 	mu     sync.Mutex
 	leaves map[string]*tls.Certificate
+}
+
+// authorities is every CA created since the broker started. A reload that
+// adds hosts creates one more CA, constrained to the hosts the older ones do
+// not cover. The older CAs keep signing for their hosts, so a client that
+// read the certificate file before the reload, such as a long-running
+// process, keeps working for the hosts it already used.
+type authorities struct {
+	list  []*authority
+	hosts []map[string]bool
+	pem   []byte // every CA certificate, oldest first
+}
+
+// extend returns a set that also covers hosts. The receiver is not changed.
+func (a *authorities) extend(hosts []string) (*authorities, error) {
+	var missing []string
+	for _, h := range hosts {
+		if !slices.ContainsFunc(a.hosts, func(m map[string]bool) bool { return m[h] }) {
+			missing = append(missing, h)
+		}
+	}
+	if len(missing) == 0 && len(a.list) > 0 {
+		return a, nil
+	}
+	ca, err := newAuthority(missing)
+	if err != nil {
+		return nil, err
+	}
+	covered := map[string]bool{}
+	for _, h := range missing {
+		covered[h] = true
+	}
+	return &authorities{
+		list:  append(slices.Clone(a.list), ca),
+		hosts: append(slices.Clone(a.hosts), covered),
+		pem:   append(slices.Clone(a.pem), ca.pem...),
+	}, nil
+}
+
+func (a *authorities) leaf(host string) (*tls.Certificate, error) {
+	for i, m := range a.hosts {
+		if m[host] {
+			return a.list[i].leaf(host)
+		}
+	}
+	return nil, errors.New("no CA for this host")
 }
 
 const (
