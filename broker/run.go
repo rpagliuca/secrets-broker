@@ -67,6 +67,7 @@ func Run(ctx context.Context, o Options) error {
 		if ctl.Grants != nil {
 			sp.Approver = ctl.Grants
 		}
+		sp.Commands = srv
 		sl, err := net.Listen("tcp", o.Config.SSH.Listen)
 		if err != nil {
 			return err

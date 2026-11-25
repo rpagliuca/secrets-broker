@@ -156,6 +156,9 @@ type SSHProxy struct {
 
 	// Approver, when set, must authorise each client for each target.
 	Approver Approver
+	// Commands, when set, lets clients reach what a running command
+	// exposes: the SSH user is the command name and only "ssh -L" works.
+	Commands CommandForwarder
 	// Dial opens the TCP connection to the first target of a chain.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Recheck is how often an open connection is checked again: token,
@@ -173,6 +176,13 @@ const (
 	sshConnect      = "ssh-connect" // Method of connection events in the audit log
 	sshDeniedToUser = "permission denied"
 )
+
+// CommandForwarder is the part of Server the SSH proxy needs for commands.
+type CommandForwarder interface {
+	CommandKnown(name string, groups []string) bool
+	CommandActive(p Principal, name string) bool
+	CommandForward(p Principal, name, dest string) (string, error)
+}
 
 // NewSSHProxy creates the proxy with a new host key.
 func NewSSHProxy(cfg *SSH, store Store, auth Authenticator, audit Auditor) (*SSHProxy, error) {
@@ -246,9 +256,10 @@ func (p *SSHProxy) handle(c net.Conn) {
 	c.SetDeadline(time.Now().Add(sshHandshake))
 
 	var (
-		who    Principal
-		token  string
-		target *SSHTarget
+		who     Principal
+		token   string
+		target  *SSHTarget
+		command string // set instead of target for the forwards of a command
 	)
 	sc := &ssh.ServerConfig{
 		MaxAuthTries:  2,
@@ -262,6 +273,10 @@ func (p *SSHProxy) handle(c net.Conn) {
 				return nil, errors.New(sshDeniedToUser)
 			}
 			t := p.cfg.Load().target(meta.User())
+			if t == nil && p.Commands != nil && p.Commands.CommandKnown(meta.User(), pr.Groups) {
+				who, token, command = pr, string(password), meta.User()
+				return nil, nil
+			}
 			if t == nil || !slices.ContainsFunc(t.Groups, func(g string) bool { return slices.Contains(pr.Groups, g) }) {
 				// The same answer for a target that does not exist and for
 				// one of another group: names are not confirmed to clients.
@@ -283,6 +298,10 @@ func (p *SSHProxy) handle(c net.Conn) {
 	// Global requests from the client (remote forwarding, keep-alives) are
 	// all answered with a failure.
 	go ssh.DiscardRequests(reqs)
+	if command != "" {
+		p.serveCommand(conn, chans, who, token, command)
+		return
+	}
 
 	ev := Event{Principal: who.ID, Groups: who.Groups, Credential: target.grantName(), Host: target.Address}
 	up, err := p.open(who, target)
@@ -316,6 +335,71 @@ func (p *SSHProxy) handle(c net.Conn) {
 		default:
 			nc.Reject(ssh.UnknownChannelType, "channel type not supported")
 		}
+	}
+}
+
+// serveCommand relays "ssh -L" channels to the Unix sockets of a command
+// that is running for this client. There is no shell and no target.
+func (p *SSHProxy) serveCommand(conn ssh.Conn, chans <-chan ssh.NewChannel, who Principal, token, name string) {
+	ev := Event{Principal: who.ID, Groups: who.Groups, Credential: "command:" + name}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		tick := time.NewTicker(p.Recheck)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			pr, err := p.auth.Authenticate(ctx, token)
+			cancel()
+			if err != nil || pr.ID != who.ID || !p.Commands.CommandActive(who, name) {
+				p.record(ev, "denied", "connection closed: the command, the grant or the token ended", sshConnect, "")
+				conn.Close()
+				return
+			}
+		}
+	}()
+	for nc := range chans {
+		if nc.ChannelType() != "direct-tcpip" {
+			nc.Reject(ssh.Prohibited, "a command only offers port forwarding")
+			continue
+		}
+		go func(nc ssh.NewChannel) {
+			var m struct {
+				Host     string
+				Port     uint32
+				OrigHost string
+				OrigPort uint32
+			}
+			ssh.Unmarshal(nc.ExtraData(), &m)
+			dest := net.JoinHostPort(m.Host, strconv.Itoa(int(m.Port)))
+			sock, err := p.Commands.CommandForward(who, name, dest)
+			if err != nil {
+				p.record(ev, "denied", err.Error(), "ssh-forward", dest)
+				nc.Reject(ssh.Prohibited, err.Error())
+				return
+			}
+			uc, err := net.DialTimeout("unix", sock, 5*time.Second)
+			if err != nil {
+				p.record(ev, "denied", "the command is not listening for this destination", "ssh-forward", dest)
+				nc.Reject(ssh.ConnectionFailed, "the command is not listening for this destination yet")
+				return
+			}
+			defer uc.Close()
+			dc, dreqs, err := nc.Accept()
+			if err != nil {
+				return
+			}
+			defer dc.Close()
+			p.record(ev, "allowed", "", "ssh-forward", dest)
+			go ssh.DiscardRequests(dreqs)
+			go func() { io.Copy(uc, dc); uc.Close() }()
+			io.Copy(dc, uc)
+		}(nc)
 	}
 }
 
@@ -505,6 +589,10 @@ func (p *SSHProxy) session(nc ssh.NewChannel, up *upstream, ev Event) {
 	go func() { io.Copy(dc, uc); out.Done() }()
 	go func() { io.Copy(dc.Stderr(), uc.Stderr()); out.Done() }()
 	go func() { io.Copy(uc, dc); uc.CloseWrite() }()
+	// reqMu is held while one client request is relayed and answered. The
+	// channel is only closed with it: a fast command would otherwise end the
+	// channel before the client got the answer to its "exec".
+	var reqMu sync.Mutex
 	go func() {
 		for r := range dreqs {
 			if !slices.Contains(sessionRequests, r.Type) {
@@ -513,6 +601,7 @@ func (p *SSHProxy) session(nc ssh.NewChannel, up *upstream, ev Event) {
 				}
 				continue
 			}
+			reqMu.Lock()
 			switch r.Type {
 			case "exec":
 				var m struct{ Command string }
@@ -529,6 +618,7 @@ func (p *SSHProxy) session(nc ssh.NewChannel, up *upstream, ev Event) {
 			if r.WantReply {
 				r.Reply(ok && err == nil, nil)
 			}
+			reqMu.Unlock()
 		}
 		uc.Close()
 	}()
@@ -540,8 +630,10 @@ func (p *SSHProxy) session(nc ssh.NewChannel, up *upstream, ev Event) {
 		}
 	}
 	out.Wait()
+	reqMu.Lock()
 	dc.CloseWrite()
 	dc.Close()
+	reqMu.Unlock()
 }
 
 func (p *SSHProxy) forward(nc ssh.NewChannel, up *upstream, t *SSHTarget, ev Event) {

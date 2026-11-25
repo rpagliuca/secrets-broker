@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -287,5 +288,73 @@ func TestCommandRunsWithSecretFilesAndStopsWithTheGrant(t *testing.T) {
 	}
 	if !h.audit.hasSSH("allowed", "command-stop", "grant ended") {
 		t.Fatalf("audit = %+v", h.audit.events)
+	}
+}
+
+func TestCommandForwardsOnlyForTheClientThatRunsIt(t *testing.T) {
+	h := newHarness(t, Credential{}, nil)
+	base := t.TempDir()
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.CommandsDir = base
+	next.Commands = []Command{{
+		Name: "vpn", Groups: []string{"team-a"},
+		Start: []string{"/bin/true"}, Stop: []string{"/bin/true"},
+		Forwards: map[string]string{"10.0.0.80:502": "plc.sock"},
+	}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	s := newSSHHarness(t, nil)
+	s.proxy.Commands = h.srv
+	post := func(action string) {
+		req, _ := http.NewRequest("POST", h.broker.URL+"/commands/vpn/"+action, nil)
+		req.Header.Set("Authorization", "Bearer token-a")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("%s: %v %v", action, resp, err)
+		}
+		resp.Body.Close()
+	}
+	if _, err := s.dial("vpn", "token-b"); err == nil {
+		t.Fatal("a client of another group connected to the command")
+	}
+
+	post("start")
+	l, err := net.Listen("unix", base+"/vpn/plc.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(c, c); c.Close() }()
+		}
+	}()
+	c := s.mustDial("vpn", "token-a")
+	conn, err := c.Dial("tcp", "10.0.0.80:502")
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	io.WriteString(conn, "ping")
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo = %q, %v", buf, err)
+	}
+	if _, err := c.Dial("tcp", "10.0.0.81:502"); err == nil {
+		t.Fatal("a destination outside the configuration was reached")
+	}
+	if _, err := c.NewSession(); err == nil {
+		t.Fatal("a command connection offered a session")
+	}
+	post("stop")
+	waitClosed(t, c)
+	c = s.mustDial("vpn", "token-a")
+	if _, err := c.Dial("tcp", "10.0.0.80:502"); err == nil {
+		t.Fatal("the forward still works after the command stopped")
 	}
 }

@@ -35,6 +35,7 @@ type Server struct {
 	oauthCache map[string]oauthToken
 
 	cmdMu   sync.Mutex // serialises start and stop of commands
+	runMu   sync.Mutex // guards running; taken alone or inside cmdMu
 	running map[string]*runningCommand
 
 	// Approver, when set, must authorise each client for each credential.

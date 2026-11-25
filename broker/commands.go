@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,6 +40,12 @@ type Command struct {
 	Env map[string]string `json:"env,omitempty"`
 	// Dir is the working directory.
 	Dir string `json:"dir,omitempty"`
+	// Forwards are what the command makes reachable, and only through the
+	// broker: a destination the client names with "ssh -L" (the SSH user is
+	// the command name) mapped to a Unix socket the command creates in
+	// "{dir}". The directory belongs to the broker, so the client that
+	// started the command, while its grant lasts, is the only one let in.
+	Forwards map[string]string `json:"forwards,omitempty"`
 }
 
 // CommandFile is one secret written as one file.
@@ -74,7 +81,46 @@ func (c *Command) validate() error {
 			return fmt.Errorf("command %q: invalid file %q for secret %q", c.Name, f.Name, f.Secret)
 		}
 	}
+	for dest, sock := range c.Forwards {
+		if host, port, err := net.SplitHostPort(dest); err != nil || host == "" || port == "" || !fileNameRE.MatchString(sock) {
+			return fmt.Errorf("command %q: forward %q must map host:port to a socket file name", c.Name, dest)
+		}
+	}
 	return nil
+}
+
+// CommandKnown reports whether a client of these groups may use the command.
+func (s *Server) CommandKnown(name string, groups []string) bool {
+	cfg, _ := s.state()
+	return cfg.commandFor(name, groups) != nil
+}
+
+// CommandActive reports whether the command is running for this client and
+// its grant is still in force.
+func (s *Server) CommandActive(p Principal, name string) bool {
+	s.runMu.Lock()
+	run := s.running[name]
+	s.runMu.Unlock()
+	return run != nil && run.by.ID == p.ID && (s.Approver == nil || s.Approver.Granted(p.ID, run.cmd.grantName()))
+}
+
+// CommandForward returns the Unix socket behind a destination of a command
+// that is running for this client.
+func (s *Server) CommandForward(p Principal, name, dest string) (string, error) {
+	if !s.CommandActive(p, name) {
+		return "", errors.New("the command is not running for this client")
+	}
+	s.runMu.Lock()
+	run := s.running[name]
+	s.runMu.Unlock()
+	if run == nil {
+		return "", errors.New("the command is not running for this client")
+	}
+	sock, ok := run.cmd.Forwards[dest]
+	if !ok {
+		return "", errors.New("forwarding to this destination is not configured")
+	}
+	return filepath.Join(run.dir, sock), nil
 }
 
 func (c *Config) commandFor(name string, groups []string) *Command {
@@ -207,10 +253,12 @@ func (s *Server) command(w http.ResponseWriter, r *http.Request) {
 			w.Write(out)
 			return
 		}
+		s.runMu.Lock()
 		if s.running == nil {
 			s.running = map[string]*runningCommand{}
 		}
 		s.running[name] = &runningCommand{cmd: *cm, by: p, token: token, since: time.Now(), dir: dir, needles: needles}
+		s.runMu.Unlock()
 		ev.Decision, ev.Status = "allowed", http.StatusOK
 		s.audit.Record(ev)
 		w.Write(out)
@@ -225,9 +273,12 @@ func (s *Server) stopCommand(name, reason string) []byte {
 	if run == nil {
 		return nil
 	}
+	// Out of the table first: forwards stop being accepted at once.
+	s.runMu.Lock()
+	delete(s.running, name)
+	s.runMu.Unlock()
 	out, err := runArgv(commandStopTimeout, &run.cmd, run.cmd.Stop, run.dir, run.needles)
 	os.RemoveAll(run.dir)
-	delete(s.running, name)
 	if err != nil {
 		reason += " (stop failed: " + err.Error() + ")"
 	}
