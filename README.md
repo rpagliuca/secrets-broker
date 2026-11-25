@@ -135,12 +135,15 @@ Unknown fields are rejected.
 | `credentials[].scheme` | `bearer`, `basic` with `username`, or `oauth2` with `token_url` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
 | `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
+| `credentials[].default` | The one used when several credentials serve a host and the client names none |
+| `services` | Optional. Clients without a person, each with a fixed list (see "Services") |
 | `ssh` | Optional. Starts the SSH proxy (see "SSH") |
 | `aws` | Optional. Temporary AWS credentials (see "Temporary AWS credentials") |
 | `commands`, `commands_dir` | Optional. Programs run for clients (see "Commands") |
 
-A host and group pair may be served by one credential only, so there is never
-a choice of which secret to send.
+A host and group pair is served by one credential, or by several with one
+marked as the default (see "Several credentials for one host"): there is
+never a silent choice of which secret to send.
 
 `SIGHUP` re-reads the secrets directory (with the key already in memory), the
 tokens file and the configuration: credentials and SSH targets are replaced
@@ -379,6 +382,33 @@ every name and the suggested duration, which becomes the first button; one
 answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
 `aws:<account>` and `command:<name>`. The client names things and suggests a
 duration; it cannot add text of its own to the question.
+
+## Services
+
+A program that runs without a person (a timer, a daemon) cannot wait for an
+approval. It gets a token of its own and a fixed list:
+
+```json
+"services": [
+  {"id": "collector", "name": "Alert collector", "sha256": "<SHA-256 of its token>",
+   "groups": ["team-a"], "credentials": ["aws:prod"]}
+]
+```
+
+The service uses what is on its list at once, with no approval, and is
+refused anything else; it cannot ask for more. It appears in the audit log
+as `service:collector`. Removing it from the configuration (and reloading)
+ends its access. The token is a secret of the service: keep it where only
+the service reads it, such as an environment file with mode 0600. What it is
+worth is the list, and only while the broker is unsealed: a service that
+must work right after a reboot will wait for the unseal.
+
+## Several credentials for one host
+
+Two credentials may serve the same host for the same group when exactly one
+is marked `"default": true`. The client picks one by giving its name as the
+user name of the proxy (`http://<credential>:<token>@127.0.0.1:8471`); any
+other user name gets the default. Each has its own grant.
 
 ## Secrets
 

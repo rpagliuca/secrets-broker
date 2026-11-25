@@ -57,6 +57,17 @@ func Run(ctx context.Context, o Options) error {
 		srv.Approver = ctl.Grants
 	}
 
+	// Services come before the other clients, both to be recognised and to
+	// have their fixed list instead of an approval.
+	sv := &services{cfg: func() *Config { c, _ := srv.state(); return c }, auth: o.Auth}
+	if ctl.Grants != nil {
+		sv.inner = ctl.Grants
+	}
+	if ctl.Grants != nil || len(o.Config.Services) > 0 {
+		srv.Approver = sv
+	}
+	srv.auth = sv
+
 	errc := make(chan error, 3)
 	var sp *SSHProxy
 	if o.Config.SSH != nil {
@@ -64,9 +75,7 @@ func Run(ctx context.Context, o Options) error {
 		if err != nil {
 			return err
 		}
-		if ctl.Grants != nil {
-			sp.Approver = ctl.Grants
-		}
+		sp.auth, sp.Approver = sv, srv.Approver
 		sp.Commands = srv
 		sl, err := net.Listen("tcp", o.Config.SSH.Listen)
 		if err != nil {

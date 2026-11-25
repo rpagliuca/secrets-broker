@@ -39,6 +39,10 @@ type Config struct {
 	// credentials.
 	AWS []AWSAccount `json:"aws,omitempty"`
 
+	// Services are clients that run without a person, each with a fixed
+	// list of credentials and no approval step.
+	Services []Service `json:"services,omitempty"`
+
 	// Commands are programs the broker runs for clients, with secrets
 	// written to CommandsDir while they run.
 	Commands    []Command `json:"commands,omitempty"`
@@ -71,6 +75,11 @@ type Credential struct {
 	// Methods, when set, restricts the HTTP methods (for example GET and
 	// HEAD for a read-only credential).
 	Methods []string `json:"methods,omitempty"`
+	// Default marks the credential used on a host that several credentials
+	// serve for the same group, when the client does not name one. The
+	// client names a credential as the user name of the proxy
+	// (http://<credential>:<token>@broker).
+	Default bool `json:"default,omitempty"`
 }
 
 var (
@@ -140,11 +149,14 @@ func (c *Config) Validate() error {
 		}
 		cmdNames[c.Commands[i].Name] = true
 	}
+	if err := c.validateServices(); err != nil {
+		return err
+	}
 	if len(c.Credentials) == 0 && c.SSH == nil && len(c.AWS) == 0 {
 		return fmt.Errorf("no credentials configured")
 	}
 	names := map[string]bool{}
-	pairs := map[string]string{}
+	pairs := map[string][]*Credential{}
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
 		if !nameRE.MatchString(cr.Name) {
@@ -194,11 +206,16 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("credential %q: empty group", cr.Name)
 				}
 				key := h + "\x00" + g
-				if other, dup := pairs[key]; dup {
-					return fmt.Errorf("credentials %q and %q both serve host %s for group %s", other, cr.Name, h, g)
-				}
-				pairs[key] = cr.Name
+				pairs[key] = append(pairs[key], cr)
 			}
+		}
+	}
+	// Several credentials may serve one host for one group only when exactly
+	// one of them is the default: there is never a silent choice.
+	for key, crs := range pairs {
+		if len(crs) > 1 && len(slices.DeleteFunc(slices.Clone(crs), func(cr *Credential) bool { return !cr.Default })) != 1 {
+			h, g, _ := strings.Cut(key, "\x00")
+			return fmt.Errorf("credentials %q and %q both serve host %s for group %s: mark exactly one as default", crs[0].Name, crs[1].Name, h, g)
 		}
 	}
 	return nil
@@ -216,11 +233,16 @@ func (c *Config) hosts() []string {
 
 // credentialFor returns the credential bound to host that a client in groups
 // may use. When there is none, the second value says why.
-func (c *Config) credentialFor(host string, groups []string) (*Credential, string) {
-	var found *Credential
-	known := false
+// credentialFor chooses the credential of a client on a host. want is the
+// user name the client gave to the proxy: when it is the name of a
+// credential, that one is used or nothing; otherwise the only credential, or
+// the default among several.
+func (c *Config) credentialFor(host string, groups []string, want string) (*Credential, string) {
+	var found, named, byDefault *Credential
+	known, wantIsName, n := false, false, 0
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
+		wantIsName = wantIsName || cr.Name == want
 		if !slices.Contains(cr.Hosts, host) {
 			continue
 		}
@@ -228,12 +250,23 @@ func (c *Config) credentialFor(host string, groups []string) (*Credential, strin
 		if !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(cr.Groups, g) }) {
 			continue
 		}
-		if found != nil {
-			return nil, "more than one credential matches this client on this host"
+		found, n = cr, n+1
+		if cr.Name == want {
+			named = cr
 		}
-		found = cr
+		if cr.Default {
+			byDefault = cr
+		}
 	}
 	switch {
+	case named != nil:
+		return named, ""
+	case wantIsName:
+		return nil, "the named credential does not serve this client on this host"
+	case n > 1 && byDefault != nil:
+		return byDefault, ""
+	case n > 1:
+		return nil, "more than one credential matches this client on this host"
 	case found != nil:
 		return found, ""
 	case known:
