@@ -152,6 +152,13 @@ func (c *Config) Validate() error {
 	if err := c.validateServices(); err != nil {
 		return err
 	}
+	if c.Approval != nil {
+		for _, name := range c.Approval.Open {
+			if !c.known(name) {
+				return fmt.Errorf("approval: open names %q, which is not configured", name)
+			}
+		}
+	}
 	if len(c.Credentials) == 0 && c.SSH == nil && len(c.AWS) == 0 {
 		return fmt.Errorf("no credentials configured")
 	}

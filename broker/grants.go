@@ -80,6 +80,12 @@ type Approval struct {
 	// Cooldown is how long a client waits before asking again for the same
 	// credential after a refusal or an unanswered request. Default 10m.
 	Cooldown Duration `json:"cooldown,omitempty"`
+	// Open lists what needs no approval, by the name used in grants
+	// ("name", "ssh:<target>", "aws:<account>", "command:<name>"). Every
+	// authenticated client of the right group uses these at once. They
+	// still go through the broker: the secret stays in it and each use is
+	// in the audit log.
+	Open []string `json:"open,omitempty"`
 }
 
 // Duration is a time.Duration written as a string ("90m") in JSON.
