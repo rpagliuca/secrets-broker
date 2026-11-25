@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rpagliuca/secrets-broker/agestore"
 	"github.com/rpagliuca/secrets-broker/broker"
@@ -27,6 +29,7 @@ const usage = `usage: secrets-broker <command> [flags]
 
   serve   -config FILE [-no-mlock]   run the proxy (starts sealed)
   token                              print a new client token and its SHA-256
+  aws-credentials ACCOUNT            print temporary AWS credentials (for credential_process)
 
 Commands sent to the control socket (-socket PATH):
 
@@ -80,6 +83,29 @@ func Main(customize Customize) {
 			log.Fatalf("secrets-broker: %v", err)
 		}
 		fmt.Println(reply)
+	case "aws-credentials":
+		// For "credential_process" in an AWS configuration file.
+		addr := fs.String("url", "http://127.0.0.1:8471", "address of the broker")
+		env := fs.String("token-env", "SECRETS_BROKER_TOKEN", "environment variable that holds the client token")
+		fs.Parse(args)
+		if fs.NArg() != 1 {
+			log.Fatal("usage: secrets-broker aws-credentials [-url URL] [-token-env NAME] ACCOUNT")
+		}
+		req, err := http.NewRequest(http.MethodGet, *addr+"/aws/"+fs.Arg(0), nil)
+		if err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+os.Getenv(*env))
+		client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			log.Fatal(strings.TrimSpace(string(body)))
+		}
+		os.Stdout.Write(body)
 	case "token":
 		raw := make([]byte, 32)
 		rand.Read(raw)

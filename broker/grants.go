@@ -213,6 +213,16 @@ func (g *Grants) Granted(principal, credential string) bool {
 	return e != nil && g.now().Before(e.until)
 }
 
+// Until returns when the grant ends, or the zero time without a grant.
+func (g *Grants) Until(principal, credential string) time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if e := g.entries[grantKey{principal, credential}]; e != nil {
+		return e.until
+	}
+	return time.Time{}
+}
+
 // Decide answers a waiting request: a positive duration grants it for that
 // long, zero refuses it. by says who answered, for the audit log.
 func (g *Grants) Decide(id string, d time.Duration, by string) error {

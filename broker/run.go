@@ -93,6 +93,11 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
+	watched := make(chan struct{})
+	wctx, stopWatch := context.WithCancel(context.Background())
+	go func() { srv.WatchCommands(wctx, 5*time.Second); close(watched) }()
+	// Commands are stopped, and their files removed, before Run returns.
+	defer func() { stopWatch(); <-watched }()
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	go func() { errc <- hs.Serve(l) }()
 	log.Printf("secrets-broker listening on %s (sealed=%t)", l.Addr(), srv.Sealed())
@@ -139,7 +144,7 @@ func reloadConfig(o *Options, srv *Server, sp *SSHProxy) error {
 		}
 		return c.SSH.Listen
 	}
-	if nc.Listen != old.Listen || nc.ControlSocket != old.ControlSocket || nc.CACertFile != old.CACertFile ||
+	if nc.Listen != old.Listen || nc.ControlSocket != old.ControlSocket || nc.CACertFile != old.CACertFile || nc.CommandsDir != old.CommandsDir ||
 		sshListen(nc) != sshListen(old) || (nc.Approval == nil) != (old.Approval == nil) {
 		return errors.New("listen addresses, control socket, CA file and the presence of ssh or approval only change with a restart")
 	}

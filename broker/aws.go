@@ -1,0 +1,287 @@
+package broker
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// AWSAccount lets clients obtain temporary AWS credentials. The broker holds
+// a long-term access key and asks STS for a session; the client receives
+// credentials that expire, never the key.
+type AWSAccount struct {
+	// Name is what the client asks for: GET /aws/<name>.
+	Name string `json:"name"`
+	// Secret is the name, in the Store, of "ACCESS_KEY_ID:SECRET_ACCESS_KEY".
+	// Defaults to Name. It must be bound to the STS host of the region.
+	Secret string `json:"secret,omitempty"`
+	// Groups are the client groups allowed to use the account.
+	Groups []string `json:"groups"`
+	// Region selects the STS endpoint. Default us-east-1.
+	Region string `json:"region,omitempty"`
+	// RoleARN, when set, is assumed (AssumeRole). Without it the session
+	// belongs to the user of the key (GetSessionToken).
+	RoleARN string `json:"role_arn,omitempty"`
+	// MaxDuration limits how long the credentials last. Default 1h. With
+	// approval they also end with the grant, but never last under 15m,
+	// which is the shortest session STS issues.
+	MaxDuration Duration `json:"max_duration,omitempty"`
+}
+
+var awsRegionRE = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]$`)
+
+const awsMinSession = 15 * time.Minute
+
+func (a *AWSAccount) secretName() string {
+	if a.Secret != "" {
+		return a.Secret
+	}
+	return a.Name
+}
+
+func (a *AWSAccount) grantName() string { return "aws:" + a.Name }
+
+func (a *AWSAccount) region() string {
+	if a.Region != "" {
+		return a.Region
+	}
+	return "us-east-1"
+}
+
+func (a *AWSAccount) stsHost() string { return "sts." + a.region() + ".amazonaws.com" }
+
+func (a *AWSAccount) maxDuration() time.Duration {
+	if a.MaxDuration > 0 {
+		return time.Duration(a.MaxDuration)
+	}
+	return time.Hour
+}
+
+func (a *AWSAccount) validate() error {
+	switch {
+	case !nameRE.MatchString(a.Name):
+		return fmt.Errorf("aws account: invalid name %q", a.Name)
+	case a.Secret != "" && !nameRE.MatchString(a.Secret):
+		return fmt.Errorf("aws account %q: invalid secret name", a.Name)
+	case len(a.Groups) == 0 || slices.Contains(a.Groups, ""):
+		return fmt.Errorf("aws account %q: needs at least one group", a.Name)
+	case a.Region != "" && !awsRegionRE.MatchString(a.Region):
+		return fmt.Errorf("aws account %q: invalid region %q", a.Name, a.Region)
+	case a.RoleARN != "" && !strings.HasPrefix(a.RoleARN, "arn:aws"):
+		return fmt.Errorf("aws account %q: role_arn must be an ARN", a.Name)
+	case a.MaxDuration != 0 && (time.Duration(a.MaxDuration) < awsMinSession || time.Duration(a.MaxDuration) > 12*time.Hour):
+		return fmt.Errorf("aws account %q: max_duration must be between 15m and 12h", a.Name)
+	}
+	return nil
+}
+
+func (c *Config) awsAccount(name string, groups []string) *AWSAccount {
+	for i := range c.AWS {
+		a := &c.AWS[i]
+		if a.Name == name && slices.ContainsFunc(a.Groups, func(g string) bool { return slices.Contains(groups, g) }) {
+			return a
+		}
+	}
+	return nil
+}
+
+// awsCredentials is the output format of an AWS credential_process.
+type awsCredentials struct {
+	Version         int       `json:"Version"`
+	AccessKeyID     string    `json:"AccessKeyId"`
+	SecretAccessKey string    `json:"SecretAccessKey"`
+	SessionToken    string    `json:"SessionToken"`
+	Expiration      time.Time `json:"Expiration"`
+}
+
+// aws serves GET /aws/<name>: temporary credentials for one account.
+func (s *Server) aws(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/aws/")
+	ev := Event{Time: time.Now().UTC(), Method: "aws-credentials", Credential: "aws:" + name}
+	deny := func(code int, reason string) {
+		ev.Decision, ev.Reason, ev.Status = "denied", reason, code
+		s.audit.Record(ev)
+		http.Error(w, "secrets-broker: "+reason, code)
+	}
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		deny(http.StatusUnauthorized, "missing token")
+		return
+	}
+	p, err := s.auth.Authenticate(r.Context(), token)
+	if err != nil {
+		deny(http.StatusUnauthorized, "invalid token")
+		return
+	}
+	ev.Principal, ev.Groups = p.ID, p.Groups
+	cfg, _ := s.state()
+	acct := cfg.awsAccount(name, p.Groups)
+	if acct == nil {
+		deny(http.StatusForbidden, "no such account for this client")
+		return
+	}
+	ev.Host = acct.stsHost()
+	sec, err := s.store.Get(acct.secretName())
+	if err == nil && !slices.Contains(sec.Hosts, acct.stsHost()) {
+		err = errHostNotBound
+	}
+	if err != nil {
+		if errors.Is(err, ErrSealed) {
+			s.forget()
+		}
+		deny(statusFor(err), err.Error())
+		return
+	}
+	keyID, secretKey, ok := strings.Cut(string(sec.Value), ":")
+	if !ok || keyID == "" || secretKey == "" {
+		deny(http.StatusInternalServerError, "the secret is not ACCESS_KEY_ID:SECRET_ACCESS_KEY")
+		return
+	}
+	d := acct.maxDuration()
+	if s.Approver != nil {
+		if err := s.Approver.Authorize(p, acct.grantName(), []string{acct.stsHost()}); err != nil {
+			deny(http.StatusForbidden, err.Error())
+			return
+		}
+		if u, ok := s.Approver.(interface {
+			Until(principal, credential string) time.Time
+		}); ok {
+			d = min(d, time.Until(u.Until(p.ID, acct.grantName())))
+		}
+	}
+	d = max(d, awsMinSession).Truncate(time.Second)
+
+	// One STS call serves every request of the same client until shortly
+	// before the session ends.
+	key := p.ID + "\x00" + acct.Name
+	s.cacheMu.Lock()
+	creds, hit := s.awsCache[key]
+	s.cacheMu.Unlock()
+	if !hit || time.Until(creds.Expiration) < 5*time.Minute {
+		creds, err = stsSession(r.Context(), s.Transport, acct, keyID, secretKey, d, p.ID, time.Now())
+		if err != nil {
+			deny(http.StatusBadGateway, "upstream: "+err.Error())
+			return
+		}
+		s.cacheMu.Lock()
+		if s.awsCache == nil {
+			s.awsCache = map[string]awsCredentials{}
+		}
+		s.awsCache[key] = creds
+		s.cacheMu.Unlock()
+	}
+	ev.Decision, ev.Status = "allowed", http.StatusOK
+	s.audit.Record(ev)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(creds)
+}
+
+// forget drops what was derived from secrets and is kept between requests.
+func (s *Server) forget() {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.awsCache, s.oauthCache = nil, nil
+}
+
+var (
+	awsSessionNameRE = regexp.MustCompile(`[^\w+=,.@-]`)
+	awsErrorCodeRE   = regexp.MustCompile(`<Code>([A-Za-z0-9.]+)</Code>`)
+)
+
+// stsSession asks STS for temporary credentials, signing with the long-term
+// key. Only the error code of a refusal is kept.
+func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID, secretKey string, d time.Duration, client string, now time.Time) (awsCredentials, error) {
+	form := url.Values{"Version": {"2011-06-15"}, "DurationSeconds": {strconv.Itoa(int(d.Seconds()))}}
+	if a.RoleARN != "" {
+		name := awsSessionNameRE.ReplaceAllString(client, "-")
+		form.Set("Action", "AssumeRole")
+		form.Set("RoleArn", a.RoleARN)
+		form.Set("RoleSessionName", (name + "--")[:min(len(name)+2, 64)])
+	} else {
+		form.Set("Action", "GetSessionToken")
+	}
+	body := form.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+a.stsHost()+"/", strings.NewReader(body))
+	if err != nil {
+		return awsCredentials{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	signV4(req, body, keyID, secretKey, a.region(), "sts", now)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		return awsCredentials{}, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		code := "no error code"
+		if m := awsErrorCodeRE.FindSubmatch(data); m != nil {
+			code = string(m[1])
+		}
+		return awsCredentials{}, fmt.Errorf("STS answered %d (%s)", resp.StatusCode, code)
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return awsCredentials{}, errors.New("STS answer without credentials")
+		}
+		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "Credentials" {
+			var c struct {
+				AccessKeyId, SecretAccessKey, SessionToken string
+				Expiration                                 time.Time
+			}
+			if err := dec.DecodeElement(&c, &se); err != nil || c.AccessKeyId == "" || c.SecretAccessKey == "" {
+				return awsCredentials{}, errors.New("STS answer without credentials")
+			}
+			return awsCredentials{1, c.AccessKeyId, c.SecretAccessKey, c.SessionToken, c.Expiration.UTC()}, nil
+		}
+	}
+}
+
+// signV4 adds an AWS Signature Version 4 to a request with a known body.
+// Signed headers: content-type, host and x-amz-date.
+func signV4(req *http.Request, body, keyID, secretKey, region, service string, now time.Time) {
+	amzDate := now.UTC().Format("20060102T150405Z")
+	date := amzDate[:8]
+	req.Header.Set("X-Amz-Date", amzDate)
+	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+	mac := func(key []byte, s string) []byte {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte(s))
+		return m.Sum(nil)
+	}
+
+	uri := req.URL.EscapedPath()
+	if uri == "" {
+		uri = "/"
+	}
+	const signed = "content-type;host;x-amz-date"
+	canonical := strings.Join([]string{
+		req.Method, uri, req.URL.RawQuery,
+		"content-type:" + req.Header.Get("Content-Type"),
+		"host:" + req.URL.Host,
+		"x-amz-date:" + amzDate,
+		"", signed, sum(body),
+	}, "\n")
+	scope := date + "/" + region + "/" + service + "/aws4_request"
+	toSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sum(canonical)
+	key := mac(mac(mac(mac([]byte("AWS4"+secretKey), date), region), service), "aws4_request")
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+keyID+"/"+scope+
+		", SignedHeaders="+signed+", Signature="+hex.EncodeToString(mac(key, toSign)))
+}

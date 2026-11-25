@@ -30,6 +30,13 @@ type Server struct {
 	auth  Authenticator
 	audit Auditor
 
+	cacheMu    sync.Mutex // guards what is derived from secrets and reused
+	awsCache   map[string]awsCredentials
+	oauthCache map[string]oauthToken
+
+	cmdMu   sync.Mutex // serialises start and stop of commands
+	running map[string]*runningCommand
+
 	// Approver, when set, must authorise each client for each credential.
 	Approver Approver
 
@@ -104,6 +111,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.connect(w, r)
 	case r.Method == http.MethodGet && r.URL.Host == "" && r.URL.Path == "/status":
 		fmt.Fprintf(w, "{\"sealed\":%t}\n", s.Sealed())
+	case r.Method == http.MethodGet && r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/aws/"):
+		s.aws(w, r)
+	case r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/commands/"):
+		s.command(w, r)
 	default:
 		http.Error(w, "secrets-broker: only CONNECT is supported", http.StatusMethodNotAllowed)
 	}
@@ -242,6 +253,9 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 	}
 	secret, err := s.secretFor(cred, host)
 	if err != nil {
+		if errors.Is(err, ErrSealed) {
+			s.forget()
+		}
 		deny(statusFor(err), err.Error())
 		return
 	}
@@ -249,10 +263,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		deny(http.StatusForbidden, err.Error())
 		return
 	}
-	authz := cred.authorization(secret.Value)
-	needles := [][]byte{secret.Value}
-	if cred.Scheme == "basic" {
-		needles = append(needles, []byte(strings.TrimPrefix(authz, "Basic ")))
+	authz, needles, err := s.authorizationFor(r.Context(), cred, secret)
+	if err != nil {
+		deny(http.StatusBadGateway, err.Error())
+		return
 	}
 
 	rp := &httputil.ReverseProxy{

@@ -5,24 +5,84 @@
   "secrets_dir": "/etc/secrets-broker/secrets",
   "tokens_file": "/etc/secrets-broker/tokens.json",
   "approval": {
-    "durations": ["1h", "4h", "12h"],
+    "durations": [
+      "1h",
+      "4h",
+      "12h"
+    ],
     "request_ttl": "10m",
     "cooldown": "10m"
   },
   "credentials": [
     {
       "name": "issues-team-a",
-      "hosts": ["issues.example.com"],
-      "groups": ["team-a"],
+      "hosts": [
+        "issues.example.com"
+      ],
+      "groups": [
+        "team-a"
+      ],
       "scheme": "basic",
       "username": "bot@example.com"
     },
     {
       "name": "code-readonly",
-      "hosts": ["api.code.example.com", "code.example.com"],
-      "groups": ["team-a", "team-b"],
+      "hosts": [
+        "api.code.example.com",
+        "code.example.com"
+      ],
+      "groups": [
+        "team-a",
+        "team-b"
+      ],
       "scheme": "bearer",
-      "methods": ["GET", "HEAD"]
+      "methods": [
+        "GET",
+        "HEAD"
+      ]
+    },
+    {
+      "name": "drive",
+      "hosts": [
+        "www.googleapis.com"
+      ],
+      "groups": [
+        "team-a"
+      ],
+      "scheme": "oauth2",
+      "token_url": "https://oauth2.googleapis.com/token"
+    }
+  ],
+  "aws": [
+    {
+      "name": "prod",
+      "groups": [
+        "team-a"
+      ],
+      "region": "us-east-1",
+      "max_duration": "1h"
+    }
+  ],
+  "commands_dir": "/run/secrets-broker/commands",
+  "commands": [
+    {
+      "name": "vpn",
+      "groups": [
+        "team-a"
+      ],
+      "files": [
+        {
+          "secret": "vpn-config",
+          "name": "client.ovpn"
+        }
+      ],
+      "start": [
+        "/usr/local/bin/vpn-up",
+        "{dir}/client.ovpn"
+      ],
+      "stop": [
+        "/usr/local/bin/vpn-down"
+      ]
     }
   ],
   "ssh": {
@@ -33,16 +93,26 @@
         "name": "web",
         "address": "web.example.com:22",
         "user": "deploy",
-        "host_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"],
-        "groups": ["team-a"],
-        "forward": ["127.0.0.1:5432"]
+        "host_keys": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"
+        ],
+        "groups": [
+          "team-a"
+        ],
+        "forward": [
+          "127.0.0.1:5432"
+        ]
       },
       {
         "name": "db",
         "address": "10.0.0.5:22",
         "user": "postgres",
-        "host_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"],
-        "groups": ["team-a"],
+        "host_keys": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClo1Xst1yTl+VVPLcCUOQm1cxqsSqSK52ZUTPEwjdU4"
+        ],
+        "groups": [
+          "team-a"
+        ],
         "jump": "web"
       }
     ]
