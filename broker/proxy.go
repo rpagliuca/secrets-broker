@@ -140,7 +140,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		deny(http.StatusForbidden, "only port 443 is allowed")
 		return
 	}
-	token, ok := proxyToken(r)
+	want, token, ok := proxyToken(r)
 	if !ok {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="secrets-broker"`)
 		deny(http.StatusProxyAuthRequired, "proxy authentication required")
@@ -154,7 +154,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 	}
 	ev.Principal, ev.Groups = p.ID, p.Groups
 	cfg, ca := s.state()
-	cred, reason := cfg.credentialFor(host, p.Groups)
+	cred, reason := cfg.credentialFor(host, p.Groups, want)
 	if cred == nil {
 		deny(http.StatusForbidden, reason)
 		return
@@ -234,7 +234,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 	}
 	ev.Principal, ev.Groups = p.ID, p.Groups
 	cfg, _ := s.state()
-	if again, _ := cfg.credentialFor(host, p.Groups); again != cred {
+	if again, _ := cfg.credentialFor(host, p.Groups, cred.Name); again != cred {
 		deny(http.StatusForbidden, "this client may no longer use this credential")
 		return
 	}
@@ -355,21 +355,23 @@ func statusFor(err error) int {
 // proxyToken extracts the client token from Proxy-Authorization. With
 // "http://user:token@proxy" the token is the password; with
 // "http://token@proxy" it is the user name.
-func proxyToken(r *http.Request) (string, bool) {
+// proxyToken returns the user name and the token of Proxy-Authorization. The
+// token is the password; the user name may name a credential.
+func proxyToken(r *http.Request) (string, string, bool) {
 	const prefix = "Basic "
 	h := r.Header.Get("Proxy-Authorization")
 	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return "", false
+		return "", "", false
 	}
 	raw, err := base64.StdEncoding.DecodeString(h[len(prefix):])
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	user, pass, _ := strings.Cut(string(raw), ":")
 	if pass == "" {
-		pass = user
+		user, pass = "", user
 	}
-	return pass, pass != ""
+	return user, pass, pass != ""
 }
 
 type discard struct{}

@@ -2,12 +2,16 @@ package broker
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -413,5 +417,88 @@ func TestSeveralCredentialsInOneRequest(t *testing.T) {
 	g.Decide((<-n.ch).ID, 0, "test")
 	if _, body := call("POST", "/requests", `{"credentials":["svc"]}`); !strings.Contains(body, `"refused"`) || len(n.ch) != 0 {
 		t.Fatalf("after a refusal: %s", body)
+	}
+}
+
+func TestServiceUsesItsFixedListWithoutApproval(t *testing.T) {
+	h, _ := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	sum := sha256.Sum256([]byte("service-token-0123456789"))
+	next.Services = []Service{{ID: "collector", SHA256: hex.EncodeToString(sum[:]), Groups: []string{"team-a"}, Credentials: []string{"aws:prod"}}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(Approval{Durations: []Duration{Duration(time.Hour)}}, n, h.audit)
+	sv := &services{cfg: func() *Config { c, _ := h.srv.state(); return c }, auth: h.srv.auth, inner: g}
+	h.srv.auth, h.srv.Approver = sv, sv
+
+	// The service gets what is on its list at once, and nobody is asked.
+	if code, body := h.aws("prod", "service-token-0123456789"); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	// Off the list it is refused, and still nobody is asked.
+	_, resp := h.tunnel(goodHost, "service-token-0123456789")
+	if resp.StatusCode != 403 || len(n.ch) != 0 || len(g.Pending()) != 0 {
+		t.Fatalf("off the list: %d, %d notifications, %d pending", resp.StatusCode, len(n.ch), len(g.Pending()))
+	}
+	req, _ := http.NewRequest("POST", h.broker.URL+"/requests", strings.NewReader(`{"credentials":["svc"]}`))
+	req.Header.Set("Authorization", "Bearer service-token-0123456789")
+	if r, _ := http.DefaultClient.Do(req); r.StatusCode == 200 {
+		t.Fatal("a service asked for approval")
+	}
+	// Another client still needs the approval.
+	if code, body := h.aws("prod", "token-a"); code != 403 || !strings.Contains(body, "waiting for approval") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if !h.audit.hasSSH("allowed", "aws-credentials", "") {
+		t.Fatalf("audit = %+v", h.audit.events)
+	}
+	// A service that leaves the configuration loses everything.
+	h.srv.SetConfig(cfg)
+	if code, _ := h.aws("prod", "service-token-0123456789"); code == 200 {
+		t.Fatal("a removed service still works")
+	}
+}
+
+func TestClientNamesOneOfTwoCredentialsOfAHost(t *testing.T) {
+	seen := make(chan string, 10)
+	h := newHarness(t, Credential{Name: "read", Secret: "svc", Hosts: []string{goodHost}, Groups: []string{"team-a"}, Scheme: "bearer", Default: true},
+		func(w http.ResponseWriter, r *http.Request) { seen <- r.Header.Get("Authorization") })
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.Credentials = append(slices.Clone(cfg.Credentials),
+		Credential{Name: "write", Hosts: []string{goodHost}, Groups: []string{"team-a"}, Scheme: "bearer"},
+		Credential{Name: "elsewhere", Hosts: []string{"other.example.com"}, Groups: []string{"team-a"}, Scheme: "bearer"})
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	h.store.m["write"] = Secret{Value: []byte("the-write-secret-value"), Hosts: []string{goodHost}}
+	get := func(user string) int {
+		proxy, _ := url.Parse(h.broker.URL)
+		proxy.User = url.UserPassword(user, "token-a")
+		c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy), TLSClientConfig: &tls.Config{RootCAs: h.caPool()}}}
+		resp, err := c.Get("https://" + goodHost + "/")
+		if err != nil {
+			return 0
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if get("anything"); <-seen != "Bearer "+secretValue {
+		t.Fatal("without a name the default credential must be used")
+	}
+	if get("write"); <-seen != "Bearer the-write-secret-value" {
+		t.Fatal("the named credential was not used")
+	}
+	if code := get("elsewhere"); code != 0 || len(seen) != 0 {
+		t.Fatalf("a credential of another host was accepted as a name: %d", code)
+	}
+	two := next
+	two.Credentials = slices.Clone(next.Credentials)
+	two.Credentials[0].Default = false
+	if err := h.srv.SetConfig(&two); err == nil {
+		t.Fatal("two credentials for one host and none default was accepted")
 	}
 }
