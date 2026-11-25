@@ -66,6 +66,12 @@ type services struct {
 	inner Approver // nil when approval is not configured
 }
 
+// open reports whether a credential needs no approval.
+func (s *services) open(credential string) bool {
+	cfg := s.cfg()
+	return cfg.Approval != nil && slices.Contains(cfg.Approval.Open, credential)
+}
+
 func (s *services) byID(principal string) *Service {
 	id, ok := strings.CutPrefix(principal, servicePrefix)
 	if !ok {
@@ -106,7 +112,7 @@ func (s *services) Authorize(p Principal, credential string, hosts []string) err
 		}
 		return errServiceCredential
 	}
-	if s.inner == nil {
+	if s.inner == nil || s.open(credential) {
 		return nil
 	}
 	return s.inner.Authorize(p, credential, hosts)
@@ -117,7 +123,7 @@ func (s *services) Granted(principal, credential string) bool {
 	if sv := s.byID(principal); sv != nil {
 		return slices.Contains(sv.Credentials, credential)
 	}
-	return s.inner == nil || s.inner.Granted(principal, credential)
+	return s.inner == nil || s.open(credential) || s.inner.Granted(principal, credential)
 }
 
 // Until returns when a grant ends. A service has no end; neither has a
@@ -131,7 +137,7 @@ func (s *services) Until(principal, credential string) time.Time {
 	}
 	if u, ok := s.inner.(interface {
 		Until(principal, credential string) time.Time
-	}); ok {
+	}); ok && !s.open(credential) {
 		return u.Until(principal, credential)
 	}
 	return time.Now().Add(maxGrant)
@@ -147,6 +153,11 @@ func (s *services) Request(p Principal, credentials, hosts []string, suggested t
 	})
 	if !ok {
 		return "", errors.New("approval is not configured: there is nothing to ask for")
+	}
+	// What is open is not asked for.
+	credentials = slices.DeleteFunc(slices.Clone(credentials), s.open)
+	if len(credentials) == 0 {
+		return "", nil
 	}
 	return r.Request(p, credentials, hosts, suggested)
 }

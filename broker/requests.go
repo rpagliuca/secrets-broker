@@ -41,6 +41,21 @@ func (c *Config) catalog(groups []string) map[string][]string {
 	return out
 }
 
+// known reports whether a name, as used in grants, exists in the
+// configuration, for any group.
+func (c *Config) known(name string) bool {
+	if rest, ok := strings.CutPrefix(name, "ssh:"); ok {
+		return c.SSH != nil && c.SSH.target(rest) != nil
+	}
+	if rest, ok := strings.CutPrefix(name, "aws:"); ok {
+		return slices.ContainsFunc(c.AWS, func(a AWSAccount) bool { return a.Name == rest })
+	}
+	if rest, ok := strings.CutPrefix(name, "command:"); ok {
+		return slices.ContainsFunc(c.Commands, func(cm Command) bool { return cm.Name == rest })
+	}
+	return slices.ContainsFunc(c.Credentials, func(cr Credential) bool { return cr.Name == name })
+}
+
 // access serves the two calls a client uses to plan its work:
 //
 //	GET  /grants    what it may ask for and what it holds now

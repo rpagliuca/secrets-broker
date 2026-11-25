@@ -502,3 +502,45 @@ func TestClientNamesOneOfTwoCredentialsOfAHost(t *testing.T) {
 		t.Fatal("two credentials for one host and none default was accepted")
 	}
 }
+
+func TestOpenCredentialNeedsNoApprovalButIsLogged(t *testing.T) {
+	h, _ := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.Approval = &Approval{Durations: []Duration{Duration(time.Hour)}, Open: []string{"aws:prod"}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(*next.Approval, n, h.audit)
+	sv := &services{cfg: func() *Config { c, _ := h.srv.state(); return c }, auth: h.srv.auth, inner: g}
+	h.srv.auth, h.srv.Approver = sv, sv
+
+	if code, body := h.aws("prod", "token-a"); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if code, _ := h.aws("prod", "token-b"); code != 403 {
+		t.Fatalf("open does not mean any group: %d", code)
+	}
+	if code, _ := h.aws("prod", "nope"); code != 401 {
+		t.Fatalf("open does not mean without a token: %d", code)
+	}
+	// What is not open still waits for the approver, and asking for both
+	// asks only for that one.
+	req, _ := http.NewRequest("POST", h.broker.URL+"/requests", strings.NewReader(`{"credentials":["svc","aws:prod"]}`))
+	req.Header.Set("Authorization", "Bearer token-a")
+	if r, err := http.DefaultClient.Do(req); err != nil || r.StatusCode != 200 {
+		t.Fatalf("%v %v", r, err)
+	}
+	if asked := <-n.ch; len(asked.Credentials) != 1 || asked.Credentials[0] != "svc" {
+		t.Fatalf("asked for %v", asked.Credentials)
+	}
+	if !h.audit.hasSSH("allowed", "aws-credentials", "") {
+		t.Fatalf("the use of an open credential is not in the audit log: %+v", h.audit.events)
+	}
+	bad := next
+	bad.Approval = &Approval{Durations: next.Approval.Durations, Open: []string{"aws:nope"}}
+	if err := h.srv.SetConfig(&bad); err == nil {
+		t.Fatal("an unknown open name was accepted")
+	}
+}

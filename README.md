@@ -383,6 +383,19 @@ answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
 `aws:<account>` and `command:<name>`. The client names things and suggests a
 duration; it cannot add text of its own to the question.
 
+## Open credentials
+
+Some things are meant for every client, and are still worth keeping in the
+broker: the secret stays out of reach and each use is logged. List them in
+`approval.open`, by the name used in grants:
+
+```json
+"approval": {"durations": ["1h", "4h"], "open": ["ssh:mirror", "packages"]}
+```
+
+Any authenticated client of the right group uses them at once, with no
+request to the approver. Everything else still needs a grant.
+
 ## Services
 
 A program that runs without a person (a timer, a daemon) cannot wait for an
