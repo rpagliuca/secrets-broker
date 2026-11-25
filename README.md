@@ -363,6 +363,23 @@ the broker user, and whatever can read `commands_dir` or the process started
 by `start` can read the secret: this mechanism protects less than the
 proxies and is only as tight as the program it runs.
 
+## Asking ahead
+
+A client that knows what a task needs can ask for all of it at once, instead
+of being refused at each first use:
+
+```sh
+secrets-broker access                               # what may be asked for, and what is held
+secrets-broker request -for 4h issues-team-a ssh:web aws:prod
+```
+
+(`GET /grants` and `POST /requests` with `Authorization: Bearer <token>`;
+both commands take `-token-env NAME`.) The approver gets one question with
+every name and the suggested duration, which becomes the first button; one
+answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
+`aws:<account>` and `command:<name>`. The client names things and suggests a
+duration; it cannot add text of its own to the question.
+
 ## Secrets
 
 Each secret is one age file whose plaintext is

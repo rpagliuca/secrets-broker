@@ -358,3 +358,60 @@ func TestCommandForwardsOnlyForTheClientThatRunsIt(t *testing.T) {
 		t.Fatal("the forward still works after the command stopped")
 	}
 }
+
+func TestSeveralCredentialsInOneRequest(t *testing.T) {
+	h, _ := awsHarness(t)
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(Approval{Durations: []Duration{Duration(time.Hour)}}, n, h.audit)
+	h.srv.Approver = g
+	call := func(method, path, body string) (int, string) {
+		req, _ := http.NewRequest(method, h.broker.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer token-a")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+	if code, body := call("GET", "/grants", ""); code != 200 || !strings.Contains(body, `"available":["aws:prod","svc"]`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if code, _ := call("POST", "/requests", `{"credentials":["svc","nope"],"duration":"4h"}`); code != 400 {
+		t.Fatalf("unknown name: %d", code)
+	}
+	code, body := call("POST", "/requests", `{"credentials":["svc","aws:prod"],"duration":"4h"}`)
+	if code != 200 || !strings.Contains(body, `"request"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	req := <-n.ch
+	if len(req.Credentials) != 2 || req.Suggested != 4*time.Hour || len(g.Pending()) != 1 {
+		t.Fatalf("request = %+v", req)
+	}
+	// Asking again, or using one of them, does not ask the approver twice.
+	call("POST", "/requests", `{"credentials":["svc","aws:prod"]}`)
+	h.aws("prod", "token-a")
+	if len(n.ch) != 0 || len(g.Pending()) != 1 {
+		t.Fatalf("%d more notifications, %d pending", len(n.ch), len(g.Pending()))
+	}
+	if err := g.Decide(req.ID, 4*time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Granted("agent-a", "svc") || !g.Granted("agent-a", "aws:prod") {
+		t.Fatal("one answer must grant every credential of the request")
+	}
+	if code, _ := h.aws("prod", "token-a"); code != 200 {
+		t.Fatalf("aws after the grant: %d", code)
+	}
+	if _, body := call("GET", "/grants", ""); strings.Count(body, `"until"`) != 2 {
+		t.Fatalf("grants = %s", body)
+	}
+	// A refusal blocks every credential of the request for the cooldown.
+	g.Revoke("agent-a", "test")
+	call("POST", "/requests", `{"credentials":["svc","aws:prod"]}`)
+	g.Decide((<-n.ch).ID, 0, "test")
+	if _, body := call("POST", "/requests", `{"credentials":["svc"]}`); !strings.Contains(body, `"refused"`) || len(n.ch) != 0 {
+		t.Fatalf("after a refusal: %s", body)
+	}
+}

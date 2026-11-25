@@ -109,7 +109,10 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 		out := fmt.Sprintf("ok: %d waiting", len(reqs))
 		for _, r := range reqs {
 			out += fmt.Sprintf("\n%s  %s  %q  credential=%s  hosts=%s  since=%s", r.ID, r.Principal.ID,
-				r.Principal.Name, r.Credential, strings.Join(r.Hosts, ","), r.Created.Format(time.RFC3339))
+				r.Principal.Name, strings.Join(r.Credentials, ","), strings.Join(r.Hosts, ","), r.Created.Format(time.RFC3339))
+			if r.Suggested > 0 {
+				out += "  suggested=" + r.Suggested.String()
+			}
 		}
 		return out, nil
 	case cmd == "grants" && len(args) == 0:

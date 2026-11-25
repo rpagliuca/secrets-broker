@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -33,11 +34,18 @@ type Notifier interface {
 // by the client: what the approver reads comes from the authenticator and
 // from the configuration.
 type Request struct {
-	ID         string    `json:"id"`
-	Principal  Principal `json:"principal"`
-	Credential string    `json:"credential"`
-	Hosts      []string  `json:"hosts"`
-	Created    time.Time `json:"created"`
+	ID        string    `json:"id"`
+	Principal Principal `json:"principal"`
+	// Credential is the first of Credentials, which has everything asked
+	// for: one name when the request came from a use, several when the
+	// client asked ahead for what a task needs.
+	Credential  string    `json:"credential"`
+	Credentials []string  `json:"credentials"`
+	Hosts       []string  `json:"hosts"`
+	Created     time.Time `json:"created"`
+	// Suggested is how long the client says it needs, or zero. It is a
+	// suggestion to the approver, who chooses.
+	Suggested time.Duration `json:"suggested,omitempty"`
 }
 
 // Grant is an approved request.
@@ -93,8 +101,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
 
 const (
-	maxGrant   = 24 * time.Hour
-	maxPending = 20
+	maxGrant      = 24 * time.Hour
+	maxPending    = 20
+	maxPerRequest = 30
 )
 
 func (a *Approval) validate() error {
@@ -192,17 +201,68 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 	case len(g.pending) >= maxPending:
 		return &ApprovalError{}
 	}
+	return &ApprovalError{RequestID: g.ask(now, p, []string{credential}, hosts, 0)}
+}
+
+// ask creates one waiting request for credentials and notifies the
+// approver. The caller holds the lock and has checked each credential.
+func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, suggested time.Duration) string {
 	raw := make([]byte, 4)
 	rand.Read(raw)
-	req := Request{ID: hex.EncodeToString(raw), Principal: p, Credential: credential, Hosts: hosts, Created: now.UTC()}
+	req := Request{ID: hex.EncodeToString(raw), Principal: p, Credential: credentials[0], Credentials: credentials,
+		Hosts: hosts, Created: now.UTC(), Suggested: suggested}
 	ctx, cancel := context.WithTimeout(context.Background(), g.ttl)
 	g.pending[req.ID] = &pendingRequest{Request: req, expires: now.Add(g.ttl), cancel: cancel}
-	e.pending = req.ID
+	for _, c := range credentials {
+		key := grantKey{p.ID, c}
+		if g.entries[key] == nil {
+			g.entries[key] = &grantEntry{}
+		}
+		g.entries[key].pending = req.ID
+	}
 	g.record(req, "requested", "request "+req.ID)
 	if g.notifier != nil {
 		go g.notifier.Notify(ctx, g, req)
 	}
-	return &ApprovalError{RequestID: req.ID}
+	return req.ID
+}
+
+// Request asks for several credentials in one question to the approver,
+// with the duration the client suggests. Credentials already granted, or
+// already waiting in another request, are left out. It returns the id of
+// the request that was created, or "" when there was nothing left to ask.
+func (g *Grants) Request(p Principal, credentials, hosts []string, suggested time.Duration) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	g.expire(now)
+	if len(credentials) > maxPerRequest {
+		return "", fmt.Errorf("at most %d credentials per request", maxPerRequest)
+	}
+	if suggested < 0 || suggested > maxGrant {
+		suggested = 0
+	}
+	var ask []string
+	var blocked time.Time
+	for _, c := range credentials {
+		e := g.entries[grantKey{p.ID, c}]
+		switch {
+		case slices.Contains(ask, c) || e != nil && (now.Before(e.until) || e.pending != ""):
+		case e != nil && now.Before(e.blockedUntil):
+			blocked = e.blockedUntil
+		default:
+			ask = append(ask, c)
+		}
+	}
+	switch {
+	case len(ask) == 0 && !blocked.IsZero():
+		return "", &ApprovalError{Until: blocked}
+	case len(ask) == 0:
+		return "", nil
+	case len(g.pending) >= maxPending:
+		return "", &ApprovalError{}
+	}
+	return g.ask(now, p, ask, hosts, suggested), nil
 }
 
 // Granted implements Approver.
@@ -238,13 +298,18 @@ func (g *Grants) Decide(id string, d time.Duration, by string) error {
 		return fmt.Errorf("duration must be between 0 and %s", maxGrant)
 	}
 	g.drop(req)
-	e := g.entries[grantKey{req.Principal.ID, req.Credential}]
+	for _, c := range req.Credentials {
+		e := g.entries[grantKey{req.Principal.ID, c}]
+		if d == 0 {
+			e.blockedUntil = now.Add(g.cooldown)
+		} else {
+			e.until = now.Add(d)
+		}
+	}
 	if d == 0 {
-		e.blockedUntil = now.Add(g.cooldown)
 		g.record(req.Request, "refused", "by "+by)
 		return nil
 	}
-	e.until = now.Add(d)
 	g.record(req.Request, "granted", fmt.Sprintf("for %s, by %s", d, by))
 	return nil
 }
@@ -307,7 +372,9 @@ func (g *Grants) expire(now time.Time) {
 	for _, req := range g.pending {
 		if !now.Before(req.expires) {
 			g.drop(req)
-			g.entries[grantKey{req.Principal.ID, req.Credential}].blockedUntil = now.Add(g.cooldown)
+			for _, c := range req.Credentials {
+				g.entries[grantKey{req.Principal.ID, c}].blockedUntil = now.Add(g.cooldown)
+			}
 			g.record(req.Request, "refused", "request expired without an answer")
 		}
 	}
@@ -321,14 +388,19 @@ func (g *Grants) expire(now time.Time) {
 func (g *Grants) drop(req *pendingRequest) {
 	req.cancel()
 	delete(g.pending, req.ID)
-	if e := g.entries[grantKey{req.Principal.ID, req.Credential}]; e != nil {
-		e.pending = ""
+	for _, c := range req.Credentials {
+		if e := g.entries[grantKey{req.Principal.ID, c}]; e != nil && e.pending == req.ID {
+			e.pending = ""
+		}
 	}
 }
 
+// record writes one event per credential of the request.
 func (g *Grants) record(req Request, decision, reason string) {
-	g.audit.Record(Event{
-		Time: g.now().UTC(), Decision: decision, Reason: reason,
-		Principal: req.Principal.ID, Groups: req.Principal.Groups, Credential: req.Credential,
-	})
+	for _, c := range req.Credentials {
+		g.audit.Record(Event{
+			Time: g.now().UTC(), Decision: decision, Reason: reason,
+			Principal: req.Principal.ID, Groups: req.Principal.Groups, Credential: c,
+		})
+	}
 }
