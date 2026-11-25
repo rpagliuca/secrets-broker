@@ -27,6 +27,10 @@ type Config struct {
 	SecretsDir string `json:"secrets_dir,omitempty"`
 	TokensFile string `json:"tokens_file,omitempty"`
 
+	// Approval, when set, makes every use of a credential depend on a
+	// time-limited grant given to that client by a person.
+	Approval *Approval `json:"approval,omitempty"`
+
 	Credentials []Credential `json:"credentials"`
 }
 
@@ -85,6 +89,11 @@ func (c *Config) Validate() error {
 		host, _, err := net.SplitHostPort(c.Listen)
 		if err != nil || host == "" {
 			return fmt.Errorf("listen %q: must be host:port with an explicit host", c.Listen)
+		}
+	}
+	if c.Approval != nil {
+		if err := c.Approval.validate(); err != nil {
+			return err
 		}
 	}
 	if len(c.Credentials) == 0 {

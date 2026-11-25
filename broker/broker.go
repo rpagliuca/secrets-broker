@@ -51,8 +51,10 @@ type Unsealer interface {
 
 // Principal is an authenticated client.
 type Principal struct {
-	ID     string
-	Groups []string
+	ID     string   `json:"id"`
+	Groups []string `json:"groups"`
+	// Name is a label for people, shown to whoever approves requests.
+	Name string `json:"name,omitempty"`
 }
 
 // Authenticator turns the token a client presents into a Principal.
@@ -62,16 +64,18 @@ type Authenticator interface {
 
 // Event is one audit record. It never carries a secret or a client token.
 type Event struct {
-	Time       time.Time `json:"time"`
-	Decision   string    `json:"decision"` // "allowed" or "denied"
-	Reason     string    `json:"reason,omitempty"`
-	Principal  string    `json:"principal,omitempty"`
-	Groups     []string  `json:"groups,omitempty"`
-	Credential string    `json:"credential,omitempty"`
-	Host       string    `json:"host,omitempty"`
-	Method     string    `json:"method,omitempty"`
-	Path       string    `json:"path,omitempty"`
-	Status     int       `json:"status,omitempty"`
+	Time time.Time `json:"time"`
+	// Decision is "allowed" or "denied" for a request, and "requested",
+	// "granted", "refused" or "revoked" for the approval of a client.
+	Decision   string   `json:"decision"`
+	Reason     string   `json:"reason,omitempty"`
+	Principal  string   `json:"principal,omitempty"`
+	Groups     []string `json:"groups,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+	Host       string   `json:"host,omitempty"`
+	Method     string   `json:"method,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Status     int      `json:"status,omitempty"`
 }
 
 // Auditor receives one Event per decision the broker takes.

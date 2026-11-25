@@ -50,6 +50,7 @@ Each item has a test in `broker/proxy_test.go`.
 | Make the service redirect to another host | the `3xx` is returned as is; the follow-up is refused |
 | Write a placeholder in the body or URL hoping it is replaced by the secret | nothing is ever replaced; only the `Authorization` header is set |
 | Use a credential of another group | `403` |
+| Use a credential without a grant, or after the grant expired (with `approval`) | `403`, also inside an open tunnel |
 | Edit the configuration to point a secret at a new host | `403`: the host list is stored inside the encrypted secret |
 | Make the service echo the request headers (`TRACE`, debug endpoints) | `TRACE` is refused; a response containing the credential is cut |
 | Ask the service for an encoding the broker cannot read | the broker negotiates the encoding itself; an unreadable response is refused |
@@ -126,6 +127,7 @@ Unknown fields are rejected.
 | `ca_cert_file` | Where the CA certificate is written at start-up (a new CA at every start) |
 | `secrets_dir` | Directory of `<name>.age` files |
 | `tokens_file` | Client tokens, by SHA-256 |
+| `approval` | Optional. Makes every use depend on a time-limited grant (see "Approval") |
 | `credentials[].name` | Name in the audit log, and the secret name unless `secret` is set |
 | `credentials[].hosts` | Exact, lower-case host names; no wildcard, no port |
 | `credentials[].groups` | Client groups allowed to use the credential |
@@ -141,6 +143,44 @@ the vault key unseals again.
 
 `SIGHUP` re-reads the secrets directory (with the key already in memory) and
 the tokens file.
+
+## Approval
+
+With an `approval` block, belonging to the right group is not enough: each
+client needs a grant for each credential, given by a person, for a limited
+time.
+
+```json
+"approval": { "durations": ["1h", "4h", "12h"], "request_ttl": "10m", "cooldown": "10m" }
+```
+
+1. The first request of a client for a credential is refused with `403` and
+   creates a waiting request. The client retries later.
+2. The approver sees the client id and name (from the authenticator), the
+   credential and its hosts (from the configuration). Nothing in the request
+   is text written by the client.
+3. The approver grants it for one of the durations, or refuses it. A grant
+   covers that client and that credential only, and is checked on every
+   request, so it also ends inside an open tunnel.
+4. After a refusal, or a request nobody answered within `request_ttl`, the
+   client cannot ask again for that credential during `cooldown`. At most 20
+   requests wait at a time.
+
+Grants live in memory: a restart forgets them. Requests are answered through
+the control socket:
+
+```sh
+secrets-broker pending
+secrets-broker approve 3f9a1c22 1h
+secrets-broker deny 3f9a1c22
+secrets-broker grants
+secrets-broker revoke agent-1      # or: revoke all
+```
+
+A deployment can deliver the request somewhere else, such as a phone, by
+implementing `broker.Notifier` and calling `Grants.Decide` with the answer.
+For the approval to count as a second factor, the answer must reach the
+broker through a path the clients cannot write to.
 
 ## Secrets
 
@@ -201,6 +241,7 @@ The reference binary is a thin wrapper around three interfaces of the
 type Store interface         { Get(name string) (Secret, error) }
 type Authenticator interface { Authenticate(ctx context.Context, token string) (Principal, error) }
 type Auditor interface       { Record(Event) }
+type Notifier interface      { Notify(ctx context.Context, g *Grants, req Request) }
 ```
 
 A deployment can keep `agestore` and replace the authenticator (for example

@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/rpagliuca/secrets-broker/agestore"
@@ -23,10 +24,18 @@ import (
 const usage = `usage: secrets-broker <command> [flags]
 
   serve   -config FILE [-no-mlock]   run the proxy (starts sealed)
-  unseal  -socket PATH               read the vault key from standard input and unseal
-  seal    -socket PATH               forget the vault key and every secret
-  status  -socket PATH               report whether the broker is sealed
   token                              print a new client token and its SHA-256
+
+Commands sent to the control socket (-socket PATH):
+
+  unseal                 read the vault key from standard input and unseal
+  seal                   forget the vault key and every secret
+  status                 report whether the broker is sealed
+  pending                list the requests waiting for approval
+  approve ID DURATION    grant a request, for example: approve 3f9a1c22 1h
+  deny ID                refuse a request
+  grants                 list the grants in force
+  revoke PRINCIPAL|all   end grants before they expire
 `
 
 func main() {
@@ -45,7 +54,7 @@ func main() {
 		if err := serve(*config, *noMlock); err != nil {
 			log.Fatalf("secrets-broker: %v", err)
 		}
-	case "unseal", "seal", "status":
+	case "unseal", "seal", "status", "pending", "approve", "deny", "grants", "revoke":
 		socket := fs.String("socket", "/run/secrets-broker/control.sock", "control socket")
 		fs.Parse(args)
 		var in io.Reader // stays a nil interface unless there is a key to send
@@ -57,7 +66,7 @@ func main() {
 			}
 			in = os.Stdin
 		}
-		reply, err := broker.Control(*socket, cmd, in)
+		reply, err := broker.ControlRequest(*socket, strings.Join(append([]string{cmd}, fs.Args()...), " "), in)
 		if err != nil {
 			log.Fatalf("secrets-broker: %v", err)
 		}
