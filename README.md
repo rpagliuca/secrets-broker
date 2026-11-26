@@ -191,6 +191,8 @@ secrets-broker approve 3f9a1c22 1h
 secrets-broker deny 3f9a1c22
 secrets-broker grants
 secrets-broker revoke agent-1      # or: revoke all
+secrets-broker blocked             # clients kept from asking again after a refusal
+secrets-broker unblock agent-1     # or: unblock all; lets them ask again, grants nothing
 ```
 
 A deployment can deliver the request somewhere else, such as a phone, by

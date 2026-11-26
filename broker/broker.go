@@ -66,8 +66,8 @@ type Authenticator interface {
 type Event struct {
 	Time time.Time `json:"time"`
 	// Decision is "allowed" or "denied" for a request, and "requested",
-	// "granted", "refused", "expired" or "revoked" for the approval of a
-	// client.
+	// "granted", "refused", "expired", "revoked" or "unblocked" for the
+	// approval of a client.
 	Decision  string `json:"decision"`
 	Reason    string `json:"reason,omitempty"`
 	Principal string `json:"principal,omitempty"`

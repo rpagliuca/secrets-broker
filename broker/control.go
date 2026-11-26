@@ -136,6 +136,15 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			return "", err
 		}
 		return "ok: refused", nil
+	case cmd == "blocked" && len(args) == 0:
+		blocks := c.Grants.Blocked()
+		out := fmt.Sprintf("ok: %d blocked", len(blocks))
+		for _, b := range blocks {
+			out += fmt.Sprintf("\n%s  credential=%s  until=%s", b.Principal, b.Credential, b.Until.Format(time.RFC3339))
+		}
+		return out, nil
+	case cmd == "unblock" && len(args) == 1:
+		return fmt.Sprintf("ok: %d cooldowns ended", c.Grants.Unblock(args[0], "control socket")), nil
 	case cmd == "revoke" && len(args) == 1:
 		return fmt.Sprintf("ok: %d grants revoked", c.Grants.Revoke(args[0], "control socket")), nil
 	}

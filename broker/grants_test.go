@@ -233,3 +233,44 @@ func TestApprovalEventsCarryTheName(t *testing.T) {
 		t.Fatalf("events = %+v", audit.events)
 	}
 }
+
+// The approver may end a cooldown, so that the client asks again at once.
+func TestUnblockEndsACooldown(t *testing.T) {
+	g, _, n, audit := newTestGrants()
+	a := Principal{ID: "agent-a"}
+	b := Principal{ID: "agent-b"}
+	for _, p := range []Principal{a, b} {
+		if err := g.Decide(requestID(t, g.Authorize(p, "svc", nil)), 0, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocked := g.Blocked()
+	if len(blocked) != 2 || blocked[0].Principal != "agent-a" || blocked[0].Credential != "svc" || blocked[0].Until.IsZero() {
+		t.Fatalf("blocked = %+v", blocked)
+	}
+	if got := g.Unblock("agent-a", "test"); got != 1 {
+		t.Fatalf("unblocked %d, want 1", got)
+	}
+	if !audit.has("unblocked", "by test") {
+		t.Error("the unblock was not audited")
+	}
+	requestID(t, g.Authorize(a, "svc", nil)) // asks again at once
+	var ae *ApprovalError
+	if err := g.Authorize(b, "svc", nil); !errors.As(err, &ae) || ae.Until.IsZero() {
+		t.Fatalf("agent-b after unblocking agent-a: %v, want a cooldown", err)
+	}
+	if left := g.Blocked(); len(left) != 1 || left[0].Principal != "agent-b" {
+		t.Fatalf("blocked = %+v", left)
+	}
+	if got := g.Unblock("all", "test"); got != 1 {
+		t.Fatalf("unblocked %d, want 1", got)
+	}
+	// Unblocking grants nothing.
+	if g.Granted("agent-b", "svc") || len(g.Active()) != 0 {
+		t.Error("unblocking granted access")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(n.ch) != 3 {
+		t.Fatalf("%d notifications, want 3", len(n.ch))
+	}
+}
