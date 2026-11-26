@@ -76,10 +76,12 @@ type Event struct {
 	Name       string   `json:"name,omitempty"`
 	Groups     []string `json:"groups,omitempty"`
 	Credential string   `json:"credential,omitempty"`
-	Host       string   `json:"host,omitempty"`
-	Method     string   `json:"method,omitempty"`
-	Path       string   `json:"path,omitempty"`
-	Status     int      `json:"status,omitempty"`
+	// Scope is the scope of the credential whose grant allowed a request.
+	Scope  string `json:"scope,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Method string `json:"method,omitempty"`
+	Path   string `json:"path,omitempty"`
+	Status int    `json:"status,omitempty"`
 }
 
 // Auditor receives one Event per decision the broker takes.
