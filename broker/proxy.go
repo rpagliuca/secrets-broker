@@ -34,6 +34,8 @@ type Server struct {
 	cacheMu    sync.Mutex // guards what is derived from secrets and reused
 	awsCache   map[string]awsCredentials
 	oauthCache map[string]oauthToken
+	cfCache    map[string]issuedToken // by client and credential
+	issueMu    sync.Mutex             // one token creation at a time
 
 	cmdMu   sync.Mutex // serialises start and stop of commands
 	runMu   sync.Mutex // guards running; taken alone or inside cmdMu
@@ -267,7 +269,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		deny(http.StatusForbidden, err.Error())
 		return
 	}
-	authz, needles, err := s.authorizationFor(r.Context(), cred, secret, host)
+	authz, needles, err := s.authorizationFor(r.Context(), p, cred, secret, host)
 	if err != nil {
 		deny(http.StatusBadGateway, err.Error())
 		return

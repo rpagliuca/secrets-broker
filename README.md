@@ -65,7 +65,8 @@ Each item has a test in `broker/proxy_test.go`.
   paths is not implemented.
 - **Credentials that create credentials.** If the service lets a token create
   another token or key, the client can ask for one and read it in the
-  response.
+  response. (The master of a `cloudflare_token` credential is never sent on
+  a client's request; the tokens it issues must not manage tokens.)
 - **Root, or the broker's own user.** Memory locking and the non-dumpable flag
   stop other processes of the same user and keep secrets out of swap and core
   dumps. They do nothing against root. If the client can become root on the
@@ -132,11 +133,12 @@ Unknown fields are rejected.
 | `credentials[].name` | Name in the audit log, and the secret name unless `secret` is set |
 | `credentials[].hosts` | Exact, lower-case host names; no wildcard, no port |
 | `credentials[].groups` | Client groups allowed to use the credential |
-| `credentials[].scheme` | `bearer`, `basic` with `username`, `oauth2` with `token_url`, or `github_app` with `github_app` |
+| `credentials[].scheme` | `bearer`, `basic` with `username`, `oauth2` with `token_url`, `github_app` with `github_app`, or `cloudflare_token` with `cloudflare` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
 | `credentials[].upstream` | Optional. Where the requests really go, as `http://host:port` or `https://host:port`, instead of `https://<host>`: a service on another port, or without TLS on a private network that is already encrypted. The client still talks HTTPS to the broker under the single name in `hosts`. With `http://` the credential crosses that network in clear text |
 | `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
 | `credentials[].github_app` | For scheme `github_app` (see "GitHub App") |
+| `credentials[].cloudflare` | For scheme `cloudflare_token` (see "Cloudflare tokens issued per client") |
 | `credentials[].default` | The one used when several credentials serve a host and the client names none |
 | `services` | Optional. Clients without a person, each with a fixed list (see "Services") |
 | `ssh` | Optional. Starts the SSH proxy (see "SSH") |
@@ -394,6 +396,57 @@ Permissions are those of the GitHub API (`contents`, `pull_requests`,
 `issues`, `workflows`, ...), each `read` or `write`, at most what the app was
 installed with. Note that `contents: write` with `pull_requests: write` also
 merges pull requests: only branch protection on the repository stops that.
+
+## Cloudflare tokens issued per client
+
+Cloudflare lets a token create other tokens, each with its own policies and
+expiry. With scheme `cloudflare_token`, the secret is such a token (the
+master), and it is never sent on a client's request. For each client, on its
+first request after the grant, the broker creates a token limited to the
+policies of the credential, which expires when the grant ends (or after
+`max_duration`, default 1h, renewed while the grant lasts), and sends that
+one as `Bearer`. Neither token reaches the client.
+
+```json
+{
+  "name": "team/cloudflare/example.com/dns-edit",
+  "secret": "cloudflare-master",
+  "hosts": ["api.cloudflare.com"],
+  "groups": ["team-a"],
+  "scheme": "cloudflare_token",
+  "cloudflare": {
+    "account_id": "<account id>",
+    "policies": [
+      {"effect": "allow",
+       "resources": {"com.cloudflare.api.account.zone.<zone id>": "*"},
+       "permission_groups": [{"id": "<id of Zone Read>"}, {"id": "<id of DNS Write>"}]}
+    ],
+    "request_ip": ["203.0.113.0/24"]
+  }
+}
+```
+
+`policies` are written as the Cloudflare API takes them, with the ids of the
+permission groups (`GET /client/v4/accounts/<id>/tokens/permission_groups`
+lists them). Several credentials may share one master, each with its own
+scope: the approver grants the small one by its name. `request_ip` is
+optional and limits the issued token to those addresses, as Cloudflare sees
+them.
+
+With `account_id`, the issued tokens are owned by the account and the master
+needs "Account API Tokens Write" on that account only. Without it, they are
+user tokens and the master needs "API Tokens Write", which reaches every
+account of the user. Cloudflare never lets an issued token exceed its
+creator. Do not put a permission to manage tokens in the policies: the client
+could then create a token and read it in the response.
+
+Every minute the broker deletes the tokens whose grant ended or was revoked,
+whose credential changed or left the configuration (after `SIGHUP`), or that
+expired; when it stops, it deletes them all. Each creation and deletion is
+an event in the audit log, with the id of the token. A sealed broker no
+longer holds the master and cannot delete: what it issued ends at its expiry.
+On Cloudflare the tokens are named `secrets-broker <credential> <client>
+<time>`.
 
 ## Commands
 

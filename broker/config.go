@@ -85,6 +85,8 @@ type Credential struct {
 	Methods []string `json:"methods,omitempty"`
 	// GitHubApp is the app of scheme github_app (see GitHubApp).
 	GitHubApp *GitHubApp `json:"github_app,omitempty"`
+	// Cloudflare is what scheme cloudflare_token issues (see CloudflareToken).
+	Cloudflare *CloudflareToken `json:"cloudflare,omitempty"`
 	// Default marks the credential used on a host that several credentials
 	// serve for the same group, when the client does not name one. The
 	// client names a credential as the user name of the proxy
@@ -230,11 +232,18 @@ func (c *Config) Validate() error {
 			if err := cr.validateGitHubApp(); err != nil {
 				return err
 			}
+		case "cloudflare_token":
+			if err := cr.validateCloudflare(); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("credential %q: scheme must be bearer, basic, oauth2 or github_app", cr.Name)
+			return fmt.Errorf("credential %q: scheme must be bearer, basic, oauth2, github_app or cloudflare_token", cr.Name)
 		}
 		if cr.Scheme != "github_app" && cr.GitHubApp != nil {
 			return fmt.Errorf("credential %q: github_app is only used with scheme github_app", cr.Name)
+		}
+		if cr.Scheme != "cloudflare_token" && cr.Cloudflare != nil {
+			return fmt.Errorf("credential %q: cloudflare is only used with scheme cloudflare_token", cr.Name)
 		}
 		if cr.Scheme != "oauth2" && cr.TokenURL != "" {
 			return fmt.Errorf("credential %q: token_url is only used with scheme oauth2", cr.Name)
