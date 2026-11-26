@@ -310,8 +310,8 @@ func TestRequestCarriesTheReasonsOfTheClient(t *testing.T) {
 	}
 }
 
-// "pending json" on the control socket gives a program the waiting requests
-// whole, reasons included.
+// "pending json" and "grants json" on the control socket give a program the
+// waiting requests and the grants whole, reasons included.
 func TestControlListsPendingRequestsAsJSON(t *testing.T) {
 	g, _, _, _ := newTestGrants()
 	if _, err := g.Request(Principal{ID: "agent-a", Name: `fix "the" build`}, []string{"svc"}, []string{goodHost}, time.Hour,
@@ -334,5 +334,23 @@ func TestControlListsPendingRequestsAsJSON(t *testing.T) {
 	if len(reqs) != 1 || reqs[0].Principal.Name != `fix "the" build` || reqs[0].Reasons["svc"] != "open the pull request" ||
 		reqs[0].Suggested != time.Hour || len(reqs[0].Credentials) != 1 {
 		t.Fatalf("requests = %+v", reqs)
+	}
+
+	// Once granted, the grant keeps the name and the reason it was given for.
+	if err := g.Decide(reqs[0].ID, time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = c.run([]string{"grants", "json"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, raw, _ = strings.Cut(out, "\n")
+	var grants []Grant
+	if err := json.Unmarshal([]byte(raw), &grants); err != nil || head != "ok: 1 in force" {
+		t.Fatalf("%v in %q", err, out)
+	}
+	if len(grants) != 1 || grants[0].Principal != "agent-a" || grants[0].Name != `fix "the" build` ||
+		grants[0].Reason != "open the pull request" || grants[0].Until.IsZero() {
+		t.Fatalf("grants = %+v", grants)
 	}
 }
