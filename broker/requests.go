@@ -19,6 +19,9 @@ func (c *Config) catalog(groups []string) map[string][]string {
 	for i := range c.Credentials {
 		if cr := &c.Credentials[i]; allowed(cr.Groups) {
 			out[cr.Name] = cr.Hosts
+			for _, sc := range cr.Scopes {
+				out[sc.Name] = cr.Hosts
+			}
 		}
 	}
 	for i := range c.AWS {
@@ -41,6 +44,33 @@ func (c *Config) catalog(groups []string) map[string][]string {
 	return out
 }
 
+// lookup returns the hosts of a name a client of these groups may ask for.
+// A scope with parameters is listed in the catalog under its pattern, and
+// asked for by an instance of it, which is what lookup accepts; the
+// pattern itself is not a name that can be granted.
+func (c *Config) lookup(groups []string, name string) ([]string, bool) {
+	if strings.Contains(name, "{") {
+		return nil, false
+	}
+	catalog := c.catalog(groups)
+	if hosts, ok := catalog[name]; ok {
+		return hosts, true
+	}
+	if cr := c.resolveTemplate(name); cr != nil {
+		// A name with {repo} is in the catalog as written; what is asked
+		// for is one of its names.
+		_, ok := catalog[cr.template.Name]
+		return cr.Hosts, ok
+	}
+	for i := range c.Credentials {
+		cr := &c.Credentials[i]
+		if sc, _ := cr.scopeFor(name); sc != nil && slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(cr.Groups, g) }) {
+			return cr.Hosts, true
+		}
+	}
+	return nil, false
+}
+
 // known reports whether a name, as used in grants, exists in the
 // configuration, for any group.
 func (c *Config) known(name string) bool {
@@ -49,7 +79,10 @@ func (c *Config) known(name string) bool {
 	}
 	return slices.ContainsFunc(c.AWS, func(a AWSAccount) bool { return a.grantName() == name }) ||
 		slices.ContainsFunc(c.Commands, func(cm Command) bool { return cm.grantName() == name }) ||
-		slices.ContainsFunc(c.Credentials, func(cr Credential) bool { return cr.Name == name }) ||
+		slices.ContainsFunc(c.Credentials, func(cr Credential) bool {
+			sc, _ := cr.scopeFor(name)
+			return cr.Name == name || (sc != nil && !strings.Contains(name, "{"))
+		}) ||
 		c.resolveTemplate(name) != nil
 }
 
@@ -98,6 +131,12 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 	}
 	held := func(names []string) []grant {
 		out := []grant{}
+		if gl, ok := s.Approver.(GrantLister); ok {
+			// Instances of scopes are not in the catalog.
+			names = append(slices.Clone(names), gl.GrantsOf(p.ID)...)
+			slices.Sort(names)
+			names = slices.Compact(names)
+		}
 		for _, n := range names {
 			if u := asker.Until(p.ID, n); time.Now().Before(u) {
 				out = append(out, grant{n, u.UTC()})
@@ -126,13 +165,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 		}
 		var hosts []string
 		for _, n := range in.Credentials {
-			h, ok := catalog[n]
-			if cr := cfg.resolveTemplate(n); !ok && cr != nil {
-				// A name with {repo} is in the catalog as written; what is
-				// asked for is one of its names.
-				_, ok = catalog[cr.template.Name]
-				h = cr.Hosts
-			}
+			h, ok := cfg.lookup(p.Groups, n)
 			if !ok {
 				deny(http.StatusBadRequest, "unknown name in the request; GET /grants lists what is available")
 				return

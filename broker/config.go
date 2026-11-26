@@ -96,6 +96,9 @@ type Credential struct {
 	// template is the credential with {repo} in its name that this one was
 	// resolved from, for one repository.
 	template *Credential
+	// Scopes are narrower names for parts of what the credential reaches,
+	// each granted on its own (see Scope).
+	Scopes []Scope `json:"scopes,omitempty"`
 }
 
 var (
@@ -256,6 +259,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("credential %q: method %q is not supported", cr.Name, m)
 			}
 		}
+		for j := range cr.Scopes {
+			if err := cr.Scopes[j].validate(cr); err != nil {
+				return err
+			}
+		}
 		for _, h := range cr.Hosts {
 			if !hostRE.MatchString(h) {
 				return fmt.Errorf("credential %q: host %q must be a lower-case DNS name, without port or wildcard", cr.Name, h)
@@ -317,7 +325,12 @@ func (c *Config) credentialFor(host string, groups []string, want string) (*Cred
 		if cr.isTemplate() {
 			continue // serves only by one of its names, above
 		}
-		wantIsName = wantIsName || cr.Name == want
+		isWant := cr.Name == want
+		if !isWant && want != "" {
+			sc, _ := cr.scopeFor(want)
+			isWant = sc != nil
+		}
+		wantIsName = wantIsName || isWant
 		if !slices.Contains(cr.Hosts, host) {
 			continue
 		}
@@ -326,7 +339,7 @@ func (c *Config) credentialFor(host string, groups []string, want string) (*Cred
 			continue
 		}
 		found, n = cr, n+1
-		if cr.Name == want {
+		if isWant {
 			named = cr
 		}
 		if cr.Default {
@@ -450,6 +463,26 @@ func (c *Config) grantNamesAreUnique() error {
 		for j := i + 1; j < len(c.Credentials); j++ {
 			if b := &c.Credentials[j]; b.isTemplate() && templatesOverlap(a.Name, b.Name) {
 				return fmt.Errorf("%q and %q may name the same thing", a.Name, b.Name)
+			}
+		}
+	}
+	// A scope must not answer to a name that is something else, nor share
+	// a name with another scope.
+	var scopes []*Scope
+	for i := range c.Credentials {
+		for j := range c.Credentials[i].Scopes {
+			scopes = append(scopes, &c.Credentials[i].Scopes[j])
+		}
+	}
+	for i, sc := range scopes {
+		for name := range seen {
+			if sc.overlaps(name) {
+				return fmt.Errorf("scope %q answers to %q, which names something else", sc.Name, name)
+			}
+		}
+		for _, other := range scopes[i+1:] {
+			if sc.overlaps(other.Name) {
+				return fmt.Errorf("scopes %q and %q may answer to the same name", sc.Name, other.Name)
 			}
 		}
 	}

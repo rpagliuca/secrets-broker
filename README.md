@@ -41,7 +41,7 @@ relying on it.
 
 ## What is enforced
 
-Each item has a test in `broker/proxy_test.go`.
+Each item has a test in `broker/proxy_test.go` or `broker/scopes_test.go`.
 
 | Attack | Result |
 | --- | --- |
@@ -54,6 +54,7 @@ Each item has a test in `broker/proxy_test.go`.
 | Use a credential without a grant, or after the grant expired (with `approval`) | `403`, also inside an open tunnel |
 | Edit the configuration to point a secret at a new host | `403`: the host list is stored inside the encrypted secret |
 | Make the service echo the request headers (`TRACE`, debug endpoints) | `TRACE` is refused; a response containing the credential is cut |
+| Use a grant of a scope on another path, another method, or with `..`, `;` or an encoded `/` | `403`; nothing leaves the broker |
 | Ask the service for an encoding the broker cannot read | the broker negotiates the encoding itself; an unreadable response is refused |
 
 ## What is not covered
@@ -61,8 +62,8 @@ Each item has a test in `broker/proxy_test.go`.
 - **Misuse inside the rules.** A client that is allowed to use a credential
   can do anything that credential can do on that host, including reading data
   and sending it elsewhere by other means. Use credentials with the smallest
-  scope the service offers, and `methods` for read-only access. Restricting
-  paths is not implemented.
+  scope the service offers, `methods` for read-only access, and `scopes`
+  to narrow a grant to some paths (see "Scopes").
 - **Credentials that create credentials.** If the service lets a token create
   another token or key, the client can ask for one and read it in the
   response. (The master of a `cloudflare_token` credential is never sent on
@@ -139,6 +140,7 @@ Unknown fields are rejected.
 | `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
 | `credentials[].github_app` | For scheme `github_app` (see "GitHub App") |
 | `credentials[].cloudflare` | For scheme `cloudflare_token` (see "Cloudflare tokens issued per client") |
+| `credentials[].scopes` | Optional. Narrower names, each allowing some methods on some paths (see "Scopes") |
 | `credentials[].default` | The one used when several credentials serve a host and the client names none |
 | `services` | Optional. Clients without a person, each with a fixed list (see "Services") |
 | `ssh` | Optional. Starts the SSH proxy (see "SSH") |
@@ -536,6 +538,61 @@ to if misused, not what it is meant for: `team/aws/prod/read-only`,
 needs `secret`, because the secret store has flat names, and no two things
 may share a name. In a proxy URL the slashes of the name are written `%2F`.
 
+## Scopes
+
+A service often has one token for everything the account reaches. A scope
+is a narrower name for part of it: the same secret, on the same hosts, but
+a grant of the scope allows only the requests that match its rules.
+
+```json
+{
+  "name": "team/git-host/api-token/account-write", "secret": "git-host", "hosts": ["api.git.example"],
+  "groups": ["team-a"], "scheme": "bearer",
+  "scopes": [
+    {"name": "team/git-host/repo/{repo}/read-and-comment", "rules": [
+      {"methods": ["GET", "HEAD"], "paths": ["/2.0/repositories/team/{repo}/**"]},
+      {"methods": ["POST"], "paths": ["/2.0/repositories/team/{repo}/pullrequests/*/comments"]}
+    ]}
+  ]
+}
+```
+
+The client asks for `team/git-host/repo/web/read-and-comment` like any
+other name, and the approver reads which repository it is. Once granted,
+`GET /2.0/repositories/team/web/src/...` goes through and
+`GET /2.0/repositories/team/other/...` or a merge is refused with `403`.
+`GET /grants` lists the pattern; `POST /requests` takes instances of it,
+several in one question.
+
+- A **parameter** (`{repo}`) is a whole segment of the name, and its value
+  follows the rules of a name (lower case, digits, `.`, `_`, `-`). In a path
+  it may be part of a segment (`/issue/{project}-*`) and is compared without
+  regard to case. Every parameter must restrict some path.
+- In a **path pattern**, `*` is any text within one segment and `**`, as the
+  last segment only, any number of further segments, none included. The
+  query string is not looked at.
+- A request is allowed when **any** scope the client holds on the
+  credential allows it, so one tunnel (an MCP server, a CLI) serves several
+  grants. A grant of the credential's own name still allows everything.
+  Without either, the credential is asked for, as before.
+- A scope may be named as the proxy user, to choose the credential when
+  several serve a host.
+- Paths the service might read otherwise than the broker are refused
+  before any rule is tried: encoded `/`, `\`, `.` or `;`, a doubly encoded
+  character, a `;` (path parameters, which some servers drop before
+  routing), dot segments and empty segments.
+- The audit log names the scope that allowed each request.
+
+What a scope cannot do, because it only sees the method and the path:
+
+- A **search** whose query is in the query string or in the body (a query
+  language, a filter) reaches whatever the account reaches. Allow such
+  endpoints only in scopes meant to read everything.
+- An object addressed by an **id** that does not say where it belongs (a
+  page id, a comment id) cannot be tied to a container by its path.
+- The **response** is not filtered: what the service puts in it (links,
+  summaries of related objects) reaches the client.
+
 ## Open credentials
 
 Some things are meant for every client, and are still worth keeping in the
@@ -654,7 +711,6 @@ func main() {
 
 ## Not in this version
 
-- Path rules per credential.
 - Pass-through for hosts without a credential, and an egress allow-list.
 
 ## Development

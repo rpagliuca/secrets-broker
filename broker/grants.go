@@ -351,6 +351,21 @@ func (g *Grants) Granted(principal, credential string) bool {
 	return e != nil && g.now().Before(e.until)
 }
 
+// GrantsOf implements GrantLister.
+func (g *Grants) GrantsOf(principal string) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	var out []string
+	for key, e := range g.entries {
+		if key.principal == principal && now.Before(e.until) {
+			out = append(out, key.credential)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Until returns when the grant ends, or the zero time without a grant.
 func (g *Grants) Until(principal, credential string) time.Time {
 	g.mu.Lock()

@@ -167,7 +167,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 		deny(statusFor(err), err.Error())
 		return
 	}
-	if err := s.approved(p, cred); err != nil {
+	if _, err := s.authorize(p, cred, nil); err != nil {
 		deny(http.StatusForbidden, err.Error())
 		return
 	}
@@ -265,10 +265,12 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		deny(statusFor(err), err.Error())
 		return
 	}
-	if err := s.approved(p, cred); err != nil {
+	scope, err := s.authorize(p, cred, r)
+	if err != nil {
 		deny(http.StatusForbidden, err.Error())
 		return
 	}
+	ev.Scope = scope
 	authz, needles, err := s.authorizationFor(r.Context(), p, cred, secret, host)
 	if err != nil {
 		deny(http.StatusBadGateway, err.Error())
@@ -339,15 +341,6 @@ func (s *Server) secretFor(cred *Credential, host string) (Secret, error) {
 		return Secret{}, errors.New("secret is too short")
 	}
 	return sec, nil
-}
-
-// approved asks the Approver, when there is one. A grant can end while a
-// tunnel is open, so this runs on every request.
-func (s *Server) approved(p Principal, cred *Credential) error {
-	if s.Approver == nil {
-		return nil
-	}
-	return s.Approver.Authorize(p, cred.Name, cred.Hosts)
 }
 
 func statusFor(err error) int {

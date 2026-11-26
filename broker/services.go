@@ -51,9 +51,8 @@ func (c *Config) validateServices() error {
 		if len(s.Groups) == 0 || len(s.Credentials) == 0 {
 			return fmt.Errorf("service %q: needs groups and credentials", s.ID)
 		}
-		catalog := c.catalog(s.Groups)
 		for _, name := range s.Credentials {
-			if _, ok := catalog[name]; !ok {
+			if _, ok := c.lookup(s.Groups, name); !ok {
 				return fmt.Errorf("service %q: %q is not something its groups may use", s.ID, name)
 			}
 		}
@@ -130,6 +129,22 @@ func (s *services) Granted(principal, credential string) bool {
 		return slices.Contains(sv.Credentials, credential)
 	}
 	return s.inner == nil || s.open(credential) || s.inner.Granted(principal, credential)
+}
+
+// GrantsOf implements GrantLister: the list of a service, what is open, and
+// the grants of the inner approver.
+func (s *services) GrantsOf(principal string) []string {
+	if sv := s.byID(principal); sv != nil {
+		return sv.Credentials
+	}
+	var out []string
+	if cfg := s.cfg(); cfg.Approval != nil {
+		out = append(out, cfg.Approval.Open...)
+	}
+	if gl, ok := s.inner.(GrantLister); ok {
+		out = append(out, gl.GrantsOf(principal)...)
+	}
+	return out
 }
 
 // Until returns when a grant ends. A service has no end; neither has a
