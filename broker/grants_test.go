@@ -93,8 +93,8 @@ func TestGrantLifecycle(t *testing.T) {
 	}
 }
 
-func TestRefusalAndSilenceStartACooldown(t *testing.T) {
-	g, c, n, _ := newTestGrants()
+func TestRefusalStartsACooldownAndSilenceDoesNot(t *testing.T) {
+	g, c, n, audit := newTestGrants()
 	a := Principal{ID: "agent-a"}
 
 	id := requestID(t, g.Authorize(a, "svc", nil))
@@ -108,17 +108,21 @@ func TestRefusalAndSilenceStartACooldown(t *testing.T) {
 	c.advance(10 * time.Minute)
 	id = requestID(t, g.Authorize(a, "svc", nil)) // may ask again
 
-	// Nobody answers: the request expires and the cooldown starts again.
+	// Nobody answers: the request expires. That is not a refusal, so the
+	// client may ask again at once, and the approver is asked again.
 	c.advance(10 * time.Minute)
 	if err := g.Decide(id, time.Hour, "test"); err == nil {
 		t.Fatal("an expired request was granted")
 	}
-	if err := g.Authorize(a, "svc", nil); !errors.As(err, &ae) || ae.RequestID != "" {
-		t.Fatalf("after expiry: %v, want a cooldown", err)
+	if !audit.has("expired", "no answer in 10m0s") {
+		t.Error("the expiry was not audited")
+	}
+	if again := requestID(t, g.Authorize(a, "svc", nil)); again == id {
+		t.Fatal("the expired request is still the one waiting")
 	}
 	time.Sleep(50 * time.Millisecond) // let the notifier goroutines run
-	if len(n.ch) != 2 {
-		t.Fatalf("%d notifications, want 2", len(n.ch))
+	if len(n.ch) != 3 {
+		t.Fatalf("%d notifications, want 3", len(n.ch))
 	}
 }
 

@@ -177,8 +177,9 @@ time.
 3. The approver grants it for one of the durations, or refuses it. A grant
    covers that client and that credential only, and is checked on every
    request, so it also ends inside an open tunnel.
-4. After a refusal, or a request nobody answered within `request_ttl`, the
-   client cannot ask again for that credential during `cooldown`. At most 20
+4. After a refusal the client cannot ask again for that credential during
+   `cooldown`. A request nobody answered within `request_ttl` just expires:
+   it is not a refusal, and the client may ask again at once. At most 20
    requests wait at a time.
 
 Grants live in memory: a restart forgets them. Requests are answered through

@@ -25,7 +25,8 @@ type Approver interface {
 
 // Notifier tells the person who approves that a request is waiting, and
 // brings the answer back by calling Grants.Decide. Notify runs in its own
-// goroutine; ctx ends when the request is answered or expires.
+// goroutine; ctx ends when the request is answered (context.Canceled) or
+// expires without an answer (context.DeadlineExceeded).
 type Notifier interface {
 	Notify(ctx context.Context, g *Grants, req Request)
 }
@@ -78,7 +79,8 @@ type Approval struct {
 	// RequestTTL is how long a request waits for an answer. Default 10m.
 	RequestTTL Duration `json:"request_ttl,omitempty"`
 	// Cooldown is how long a client waits before asking again for the same
-	// credential after a refusal or an unanswered request. Default 10m.
+	// credential after a refusal. A request that expires without an answer
+	// is not a refusal: the client may ask again at once. Default 10m.
 	Cooldown Duration `json:"cooldown,omitempty"`
 	// Open lists what needs no approval, by the name used in grants
 	// ("name", "ssh:<target>", "aws:<account>", "command:<name>"). Every
@@ -378,16 +380,13 @@ func (g *Grants) Active() []Grant {
 }
 
 // expire drops unanswered requests and forgets entries with nothing left.
-// An unanswered request counts as a refusal for the cooldown, so a client
-// cannot keep the approver's phone buzzing.
+// Nobody refused an unanswered request, so it starts no cooldown: the
+// approver may simply not have seen it, and the client can ask again.
 func (g *Grants) expire(now time.Time) {
 	for _, req := range g.pending {
 		if !now.Before(req.expires) {
 			g.drop(req)
-			for _, c := range req.Credentials {
-				g.entries[grantKey{req.Principal.ID, c}].blockedUntil = now.Add(g.cooldown)
-			}
-			g.record(req.Request, "refused", "request expired without an answer")
+			g.record(req.Request, "expired", "no answer in "+g.ttl.String())
 		}
 	}
 	for key, e := range g.entries {
