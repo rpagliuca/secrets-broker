@@ -20,6 +20,10 @@ func scopedCredential() Credential {
 				{Methods: []string{"GET", "HEAD"}, Paths: []string{"/repos/team/{repo}/**"}},
 				{Methods: []string{"POST"}, Paths: []string{"/repos/team/{repo}/pulls/*/comments"}},
 			}},
+			{Name: "team/git/{repo}/pull", Rules: []ScopeRule{
+				{Methods: []string{"GET"}, Paths: []string{"/team/{repo}.git/info/refs"}},
+				{Methods: []string{"POST"}, Paths: []string{"/team/{repo}.git/git-upload-pack"}},
+			}},
 			{Name: "team/tracker/{project}/read", Rules: []ScopeRule{
 				{Methods: []string{"GET"}, Paths: []string{"/issue/{project}-*", "/project/{project}"}},
 			}},
@@ -66,7 +70,7 @@ func TestScopeAllowsOnlyItsPaths(t *testing.T) {
 	if code := raw(t, h, "GET", "/repos/team/web/src"); code != http.StatusForbidden {
 		t.Fatalf("without a grant: %d, want 403", code)
 	}
-	grant(t, g, "team/repo/web/read-and-comment", "team/tracker/ops/read")
+	grant(t, g, "team/repo/web/read-and-comment", "team/tracker/ops/read", "team/git/web/pull")
 
 	cases := []struct {
 		method, uri string
@@ -79,6 +83,8 @@ func TestScopeAllowsOnlyItsPaths(t *testing.T) {
 		{"POST", "/repos/team/web/pulls/7/comments", 200},
 		{"GET", "/issue/OPS-12", 200},
 		{"GET", "/project/ops", 200},
+		{"GET", "/team/web.git/info/refs?service=git-upload-pack", 200},
+		{"POST", "/team/web.git/git-upload-pack", 200},
 
 		{"GET", "/repos/team/other/src", 403},
 		{"GET", "/repos/team/web-other/src", 403},
@@ -91,6 +97,9 @@ func TestScopeAllowsOnlyItsPaths(t *testing.T) {
 		{"GET", "/issue/OTHER-1", 403},
 		{"GET", "/issue/OPSX-1", 403},
 		{"GET", "/search?jql=project%3DOPS", 403},
+		{"POST", "/team/web.git/git-receive-pack", 403},
+		{"POST", "/team/other.git/git-upload-pack", 403},
+		{"GET", "/team/web.gitx/info/refs", 403},
 
 		// Forms the service might read otherwise than the broker.
 		{"GET", "/repos/team/web/../other/src", 403},
@@ -122,8 +131,8 @@ func TestScopeAllowsOnlyItsPaths(t *testing.T) {
 			}
 		}
 	}
-	if allowed != 7 {
-		t.Errorf("%d allowed events, want 7", allowed)
+	if allowed != 9 {
+		t.Errorf("%d allowed events, want 9", allowed)
 	}
 
 	// The grant ends: nothing more, inside or outside the scope.
