@@ -279,6 +279,12 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = host
 			pr.Out.Host = host
+			if cred.Upstream != "" {
+				// Validated when the configuration was loaded.
+				if up, err := url.Parse(cred.Upstream); err == nil {
+					pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = up.Scheme, up.Host, up.Host
+				}
+			}
 			// Without a client Accept-Encoding the transport negotiates
 			// gzip itself and hands over the decoded body, which is what
 			// the response scan needs.

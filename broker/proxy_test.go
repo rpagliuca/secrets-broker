@@ -590,3 +590,51 @@ func TestProxyUserMayBeAPathName(t *testing.T) {
 		}
 	}
 }
+
+// A credential may send its requests somewhere else than "https://<host>":
+// another port, or plain HTTP on a private network. The client still talks
+// HTTPS to the broker under the configured name.
+func TestCredentialWithAnUpstream(t *testing.T) {
+	var seen *http.Request
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Clone(context.Background())
+		io.WriteString(w, "from the internal service")
+	}))
+	defer internal.Close()
+	cred := Credential{Name: "svc", Hosts: []string{goodHost}, Groups: []string{"team-a"}, Scheme: "bearer",
+		Upstream: "http://internal.example:3000"}
+	h := newHarness(t, cred, nil)
+	h.srv.Transport = &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr != "internal.example:3000" {
+			return nil, fmt.Errorf("unexpected dial to %s", addr)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, internal.Listener.Addr().String())
+	}}
+	resp, err := h.client("token-a").Get("https://" + goodHost + "/api/health?x=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "from the internal service" {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+	if seen == nil || seen.Header.Get("Authorization") != "Bearer "+secretValue || seen.Host != "internal.example:3000" ||
+		seen.URL.Path != "/api/health" || seen.URL.RawQuery != "x=1" {
+		t.Fatalf("the internal service saw %+v", seen)
+	}
+
+	// The configuration refuses an upstream with more than a scheme and a
+	// host, and one shared by several host names.
+	for _, bad := range []Credential{
+		{Name: "svc", Hosts: []string{goodHost}, Groups: []string{"g"}, Scheme: "bearer", Upstream: "ftp://internal.example"},
+		{Name: "svc", Hosts: []string{goodHost}, Groups: []string{"g"}, Scheme: "bearer", Upstream: "http://internal.example/path"},
+		{Name: "svc", Hosts: []string{goodHost}, Groups: []string{"g"}, Scheme: "bearer", Upstream: "http://user@internal.example"},
+		{Name: "svc", Hosts: []string{goodHost, evilHost}, Groups: []string{"g"}, Scheme: "bearer", Upstream: "http://internal.example"},
+	} {
+		cfg := &Config{Credentials: []Credential{bad}}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "upstream") {
+			t.Errorf("%s with %v: %v", bad.Upstream, bad.Hosts, err)
+		}
+	}
+}
