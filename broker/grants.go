@@ -412,7 +412,7 @@ func (g *Grants) record(req Request, decision, reason string) {
 	for _, c := range req.Credentials {
 		g.audit.Record(Event{
 			Time: g.now().UTC(), Decision: decision, Reason: reason,
-			Principal: req.Principal.ID, Groups: req.Principal.Groups, Credential: c,
+			Principal: req.Principal.ID, Name: req.Principal.Name, Groups: req.Principal.Groups, Credential: c,
 		})
 	}
 }

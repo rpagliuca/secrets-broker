@@ -67,9 +67,12 @@ type Event struct {
 	Time time.Time `json:"time"`
 	// Decision is "allowed" or "denied" for a request, and "requested",
 	// "granted", "refused" or "revoked" for the approval of a client.
-	Decision   string   `json:"decision"`
-	Reason     string   `json:"reason,omitempty"`
-	Principal  string   `json:"principal,omitempty"`
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason,omitempty"`
+	Principal string `json:"principal,omitempty"`
+	// Name is the display name of the principal. It is set on the events of
+	// an approval, so that a reader of the log can tell who an id was.
+	Name       string   `json:"name,omitempty"`
 	Groups     []string `json:"groups,omitempty"`
 	Credential string   `json:"credential,omitempty"`
 	Host       string   `json:"host,omitempty"`
