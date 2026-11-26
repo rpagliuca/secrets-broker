@@ -60,7 +60,7 @@ func (a *AWSAccount) secretName() string {
 	return a.Name
 }
 
-func (a *AWSAccount) grantName() string { return "aws:" + a.Name }
+func (a *AWSAccount) grantName() string { return grantName("aws", a.Name) }
 
 func (a *AWSAccount) region() string {
 	if a.Region != "" {
@@ -80,8 +80,10 @@ func (a *AWSAccount) maxDuration() time.Duration {
 
 func (a *AWSAccount) validate() error {
 	switch {
-	case !nameRE.MatchString(a.Name):
+	case !pathNameRE.MatchString(a.Name):
 		return fmt.Errorf("aws account: invalid name %q", a.Name)
+	case strings.Contains(a.Name, "/") && a.Secret == "":
+		return fmt.Errorf("aws account %q: a name that is a path needs \"secret\"", a.Name)
 	case a.Secret != "" && !nameRE.MatchString(a.Secret):
 		return fmt.Errorf("aws account %q: invalid secret name", a.Name)
 	case len(a.Groups) == 0 || slices.Contains(a.Groups, ""):
@@ -118,7 +120,7 @@ type awsCredentials struct {
 // aws serves GET /aws/<name>: temporary credentials for one account.
 func (s *Server) aws(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/aws/")
-	ev := Event{Time: time.Now().UTC(), Method: "aws-credentials", Credential: "aws:" + name}
+	ev := Event{Time: time.Now().UTC(), Method: "aws-credentials", Credential: grantName("aws", name)}
 	deny := func(code int, reason string) {
 		ev.Decision, ev.Reason, ev.Status = "denied", reason, code
 		s.audit.Record(ev)
@@ -210,13 +212,9 @@ var oneTimeCodeRE = regexp.MustCompile(`^[0-9]{6,8}$`)
 // needsCode reports whether a credential, by the name used in grants, can
 // only be granted with a one-time code: an AWS account with an MFA device.
 func (s *Server) needsCode(credential string) bool {
-	name, ok := strings.CutPrefix(credential, "aws:")
-	if !ok {
-		return false
-	}
 	cfg, _ := s.state()
 	for i := range cfg.AWS {
-		if cfg.AWS[i].Name == name {
+		if cfg.AWS[i].grantName() == credential {
 			return cfg.AWS[i].MFASerial != ""
 		}
 	}
@@ -227,9 +225,13 @@ func (s *Server) needsCode(credential string) bool {
 // with the one-time code typed by the approver, and keeps it for the
 // client. It returns when the session ends: the grant must not outlive it.
 func (s *Server) unlockWithCode(p Principal, credential, code string, d time.Duration) (time.Time, error) {
-	name := strings.TrimPrefix(credential, "aws:")
 	cfg, _ := s.state()
-	acct := cfg.awsAccount(name, p.Groups)
+	var acct *AWSAccount
+	for i := range cfg.AWS {
+		if cfg.AWS[i].grantName() == credential {
+			acct = cfg.awsAccount(cfg.AWS[i].Name, p.Groups)
+		}
+	}
 	if acct == nil || acct.MFASerial == "" {
 		return time.Time{}, fmt.Errorf("%s takes no one-time code", credential)
 	}

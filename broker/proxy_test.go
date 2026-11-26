@@ -577,3 +577,16 @@ func TestControlSocket(t *testing.T) {
 		t.Error("grant still valid after revoke")
 	}
 }
+
+// The name of a credential goes in the proxy URL with its slashes written
+// "%2F"; a client may send it decoded or as it was.
+func TestProxyUserMayBeAPathName(t *testing.T) {
+	for _, user := range []string{"team/github/api-token/all", "team%2Fgithub%2Fapi-token%2Fall"} {
+		r, _ := http.NewRequest("CONNECT", "http://example.com", nil)
+		r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":token-a")))
+		got, pass, ok := proxyToken(r)
+		if !ok || got != "team/github/api-token/all" || pass != "token-a" {
+			t.Errorf("%s: %q %q %t", user, got, pass, ok)
+		}
+	}
+}

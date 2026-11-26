@@ -84,7 +84,10 @@ type Credential struct {
 
 var (
 	nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-	hostRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+	// pathNameRE is the name of something a client asks for. It may be a
+	// path, such as "team/github/ssh/all-repositories": see grantName.
+	pathNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$`)
+	hostRE     = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 )
 
 // allowedMethods is every method the broker forwards. TRACE is left out on
@@ -152,6 +155,9 @@ func (c *Config) Validate() error {
 		}
 		cmdNames[c.Commands[i].Name] = true
 	}
+	if err := c.grantNamesAreUnique(); err != nil {
+		return err
+	}
 	if err := c.validateServices(); err != nil {
 		return err
 	}
@@ -169,8 +175,11 @@ func (c *Config) Validate() error {
 	pairs := map[string][]*Credential{}
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
-		if !nameRE.MatchString(cr.Name) {
+		if !pathNameRE.MatchString(cr.Name) {
 			return fmt.Errorf("credential %d: invalid name %q", i, cr.Name)
+		}
+		if strings.Contains(cr.Name, "/") && cr.Secret == "" {
+			return fmt.Errorf("credential %q: a name that is a path needs \"secret\"", cr.Name)
 		}
 		if names[cr.Name] {
 			return fmt.Errorf("credential %q: duplicate name", cr.Name)
@@ -311,4 +320,53 @@ func (cr *Credential) authorization(secret []byte) string {
 // normalizeHost lower-cases a host name and drops a trailing dot.
 func normalizeHost(h string) string {
 	return strings.TrimSuffix(strings.ToLower(h), ".")
+}
+
+// grantName is the name of a credential, account, target or command in
+// grants and requests. A plain name carries its kind in front ("ssh:web",
+// "aws:prod", "command:vpn"; a proxied credential has none). A name that is
+// a path ("team/aws/prod/read-only") says its kind where the writer wants
+// it and is used whole, so that the approver reads one name, chosen to
+// state the most that it gives access to.
+func grantName(kind, name string) string {
+	if kind == "" || strings.Contains(name, "/") {
+		return name
+	}
+	return kind + ":" + name
+}
+
+// grantNamesAreUnique refuses two things of different kinds under the same
+// name in grants, which path names make possible.
+func (c *Config) grantNamesAreUnique() error {
+	seen := map[string]bool{}
+	add := func(name string) error {
+		if seen[name] {
+			return fmt.Errorf("%q names more than one thing a client can ask for", name)
+		}
+		seen[name] = true
+		return nil
+	}
+	for i := range c.Credentials {
+		if err := add(c.Credentials[i].Name); err != nil {
+			return err
+		}
+	}
+	for i := range c.AWS {
+		if err := add(c.AWS[i].grantName()); err != nil {
+			return err
+		}
+	}
+	for i := range c.Commands {
+		if err := add(c.Commands[i].grantName()); err != nil {
+			return err
+		}
+	}
+	if c.SSH != nil {
+		for i := range c.SSH.Targets {
+			if err := add(c.SSH.Targets[i].grantName()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

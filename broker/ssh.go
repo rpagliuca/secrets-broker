@@ -66,7 +66,7 @@ func (t *SSHTarget) secretName() string {
 
 // grantName is the name of the target in grants and in the audit log. The
 // prefix keeps it apart from HTTP credentials.
-func (t *SSHTarget) grantName() string { return "ssh:" + t.Name }
+func (t *SSHTarget) grantName() string { return grantName("ssh", t.Name) }
 
 func (c *SSH) target(name string) *SSHTarget {
 	for i := range c.Targets {
@@ -101,7 +101,7 @@ func (c *SSH) validate() error {
 	names := map[string]bool{}
 	for i := range c.Targets {
 		t := &c.Targets[i]
-		if !nameRE.MatchString(t.Name) || names[t.Name] {
+		if !pathNameRE.MatchString(t.Name) || names[t.Name] {
 			return fmt.Errorf("ssh target %d: invalid or duplicate name %q", i, t.Name)
 		}
 		names[t.Name] = true
@@ -341,7 +341,7 @@ func (p *SSHProxy) handle(c net.Conn) {
 // serveCommand relays "ssh -L" channels to the Unix sockets of a command
 // that is running for this client. There is no shell and no target.
 func (p *SSHProxy) serveCommand(conn ssh.Conn, chans <-chan ssh.NewChannel, who Principal, token, name string) {
-	ev := Event{Principal: who.ID, Groups: who.Groups, Credential: "command:" + name}
+	ev := Event{Principal: who.ID, Groups: who.Groups, Credential: grantName("command", name)}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {

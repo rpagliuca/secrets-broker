@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -370,6 +371,13 @@ func proxyToken(r *http.Request) (string, string, bool) {
 	user, pass, _ := strings.Cut(string(raw), ":")
 	if pass == "" {
 		user, pass = "", user
+	}
+	// The user comes from a proxy URL, where the slashes of a path name are
+	// written "%2F". Not every client decodes it before sending.
+	if strings.Contains(user, "%") {
+		if decoded, err := url.PathUnescape(user); err == nil {
+			user = decoded
+		}
 	}
 	return user, pass, pass != ""
 }

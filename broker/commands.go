@@ -62,10 +62,10 @@ const (
 	commandMaxOutput    = 64 << 10
 )
 
-func (c *Command) grantName() string { return "command:" + c.Name }
+func (c *Command) grantName() string { return grantName("command", c.Name) }
 
 func (c *Command) validate() error {
-	if !nameRE.MatchString(c.Name) || len(c.Groups) == 0 || slices.Contains(c.Groups, "") {
+	if !pathNameRE.MatchString(c.Name) || len(c.Groups) == 0 || slices.Contains(c.Groups, "") {
 		return fmt.Errorf("command %q: needs a valid name and at least one group", c.Name)
 	}
 	for _, argv := range [][]string{c.Start, c.Stop} {
@@ -145,11 +145,14 @@ type runningCommand struct {
 // command serves GET /commands/<name>, POST /commands/<name>/start and
 // POST /commands/<name>/stop.
 func (s *Server) command(w http.ResponseWriter, r *http.Request) {
-	name, action, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/commands/"), "/")
-	if action == "" {
-		action = "status"
+	// The name may be a path; the action, when there is one, comes last.
+	name, action := strings.TrimPrefix(r.URL.Path, "/commands/"), "status"
+	for _, a := range []string{"start", "stop"} {
+		if rest, ok := strings.CutSuffix(name, "/"+a); ok {
+			name, action = rest, a
+		}
 	}
-	ev := Event{Time: time.Now().UTC(), Method: "command-" + action, Credential: "command:" + name}
+	ev := Event{Time: time.Now().UTC(), Method: "command-" + action, Credential: grantName("command", name)}
 	deny := func(code int, reason string) {
 		ev.Decision, ev.Reason, ev.Status = "denied", reason, code
 		s.audit.Record(ev)
@@ -230,7 +233,8 @@ func (s *Server) command(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		dir := filepath.Join(cfg.CommandsDir, name)
+		// One directory per command, also when its name is a path.
+		dir := filepath.Join(cfg.CommandsDir, strings.ReplaceAll(name, "/", "__"))
 		os.RemoveAll(dir)
 		err := os.MkdirAll(dir, 0o700)
 		for i, f := range cm.Files {
