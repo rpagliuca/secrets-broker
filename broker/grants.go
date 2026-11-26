@@ -351,6 +351,53 @@ func (g *Grants) Revoke(principal, by string) int {
 	return n
 }
 
+// Block is a client kept from asking again for a credential, after a refusal.
+type Block struct {
+	Principal  string    `json:"principal"`
+	Credential string    `json:"credential"`
+	Until      time.Time `json:"until"`
+}
+
+// Blocked lists the cooldowns in force, soonest to end first.
+func (g *Grants) Blocked() []Block {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	g.expire(now)
+	var out []Block
+	for key, e := range g.entries {
+		if now.Before(e.blockedUntil) {
+			out = append(out, Block{Principal: key.principal, Credential: key.credential, Until: e.blockedUntil})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Until.Equal(out[j].Until) {
+			return out[i].Until.Before(out[j].Until)
+		}
+		return out[i].Principal+"\x00"+out[i].Credential < out[j].Principal+"\x00"+out[j].Credential
+	})
+	return out
+}
+
+// Unblock ends the cooldowns of a client, or of every client when principal
+// is "all", so that it may ask again at once. It grants nothing. It returns
+// how many cooldowns were ended.
+func (g *Grants) Unblock(principal, by string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	n := 0
+	for key, e := range g.entries {
+		if (principal != "all" && key.principal != principal) || !now.Before(e.blockedUntil) {
+			continue
+		}
+		e.blockedUntil = time.Time{}
+		n++
+		g.audit.Record(Event{Time: now.UTC(), Decision: "unblocked", Reason: "by " + by, Principal: key.principal, Credential: key.credential})
+	}
+	return n
+}
+
 // Pending lists the waiting requests, oldest first.
 func (g *Grants) Pending() []Request {
 	g.mu.Lock()

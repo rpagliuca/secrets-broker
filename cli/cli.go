@@ -44,6 +44,8 @@ Commands sent to the control socket (-socket PATH):
   deny ID                refuse a request
   grants                 list the grants in force
   revoke PRINCIPAL|all   end grants before they expire
+  blocked                list the clients kept from asking again after a refusal
+  unblock PRINCIPAL|all  let them ask again at once (grants nothing)
 `
 
 // Customize adjusts the options of "serve" before the broker starts. It
@@ -69,7 +71,7 @@ func Main(customize Customize) {
 		if err := serve(*config, *noMlock, customize); err != nil {
 			log.Fatalf("secrets-broker: %v", err)
 		}
-	case "unseal", "seal", "status", "pending", "approve", "deny", "grants", "revoke":
+	case "unseal", "seal", "status", "pending", "approve", "deny", "grants", "revoke", "blocked", "unblock":
 		socket := fs.String("socket", "/run/secrets-broker/control.sock", "control socket")
 		fs.Parse(args)
 		var in io.Reader // stays a nil interface unless there is a key to send
