@@ -48,6 +48,11 @@ type Notifier struct {
 	NoUnlock bool
 	// Text writes the notification. The default is in English.
 	Text func(req broker.Request) (title, body string)
+	// Expired rewrites the notification of a request that expired without
+	// an answer: it takes the place of the question on the phone, so that
+	// whoever looks later sees why the buttons no longer count. The default
+	// is in English.
+	Expired func(req broker.Request) (title, body string)
 	// Deny and Allow label the buttons. The defaults are "Deny" and the
 	// duration, such as "4 h".
 	Deny  string
@@ -96,13 +101,20 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 	if level == "" {
 		level = "time-sensitive"
 	}
+	// Whatever happens, the question must not sit on the phone looking
+	// answerable. An answered request is taken off; one that expired is
+	// replaced by a note saying so.
+	defer func() {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			n.expired(key, req, source)
+			return
+		}
+		n.retract(key, req.ID)
+	}()
 	var sent struct {
 		ID         json.Number `json:"id"`
 		Answerable bool        `json:"answerable"`
 	}
-	// Whatever happens, take the notification off the phone at the end: a
-	// stale request must not sit there looking answerable.
-	defer n.retract(key, req.ID)
 
 	// A notification can reach the phone although the reply to this call is
 	// lost, and without its id the answer cannot be read. So a failed send
@@ -166,7 +178,7 @@ type notification struct {
 	Body       string   `json:"body"`
 	Level      string   `json:"level"`
 	CollapseID string   `json:"collapse_id"`
-	Actions    []action `json:"actions"`
+	Actions    []action `json:"actions,omitempty"`
 	Source     string   `json:"source"`
 	SourceName string   `json:"source_display_name"`
 }
@@ -239,6 +251,27 @@ func (n *Notifier) call(ctx context.Context, key, method, path string, in, out a
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// expired replaces the question by a quiet note without buttons, under the
+// same collapse id. If that fails, the question is retracted. Best effort.
+func (n *Notifier) expired(key string, req broker.Request, source string) {
+	title, body := n.text(req)
+	if n.Expired != nil {
+		title, body = n.Expired(req)
+	} else {
+		title = "Expired: " + title
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := n.call(ctx, key, http.MethodPost, "/notifications", notification{
+		Title: title, Body: body, Level: "passive", CollapseID: req.ID,
+		Source: "secrets-broker", SourceName: source,
+	}, nil)
+	if err != nil {
+		log.Printf("pushward: request %s: expired note: %v", req.ID, err)
+		n.retract(key, req.ID)
+	}
 }
 
 // retract removes the notification from the devices. Best effort.

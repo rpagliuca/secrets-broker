@@ -45,6 +45,7 @@ func newFake(t *testing.T) *fake {
 		f.auth = r.Header.Get("Authorization")
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/notifications":
+			f.sent = nil
 			json.NewDecoder(r.Body).Decode(&f.sent)
 			f.sends++
 			if f.lose > 0 {
@@ -166,6 +167,36 @@ func TestSendsAgainWhenTheReplyIsLost(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.sends != 2 {
 		t.Errorf("%d sends, want 2", f.sends)
+	}
+}
+
+// A request nobody answered leaves a note on the phone in place of the
+// question, instead of buttons that no longer count.
+func TestExpiredRequestLeavesANote(t *testing.T) {
+	f := newFake(t) // never answers
+	cfg := approval()
+	cfg.RequestTTL = broker.Duration(150 * time.Millisecond)
+	g := broker.NewGrants(cfg, f.notifier(), nil)
+	p := broker.Principal{ID: "S-1", Name: "fix the build", Groups: []string{"team-a"}}
+
+	if err := g.Authorize(p, "svc", []string{"api.example.com"}); err == nil {
+		t.Fatal("authorised before any answer")
+	}
+	waitFor(t, "the note", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.sends == 2
+	})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sent["title"] != "Expired: Credential request" || f.sent["level"] != "passive" || f.sent["actions"] != nil {
+		t.Errorf("note = %v", f.sent)
+	}
+	if f.sent["collapse_id"] == "" || f.sent["collapse_id"] == nil {
+		t.Errorf("the note does not replace the question: %v", f.sent)
+	}
+	if f.retracted != "" {
+		t.Error("the note was retracted")
 	}
 }
 
