@@ -235,7 +235,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 	}
 	ev.Principal, ev.Groups = p.ID, p.Groups
 	cfg, _ := s.state()
-	if again, _ := cfg.credentialFor(host, p.Groups, cred.Name); again != cred {
+	if again, _ := cfg.credentialFor(host, p.Groups, cred.Name); !sameCredential(again, cred) {
 		deny(http.StatusForbidden, "this client may no longer use this credential")
 		return
 	}
@@ -267,7 +267,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, token, host str
 		deny(http.StatusForbidden, err.Error())
 		return
 	}
-	authz, needles, err := s.authorizationFor(r.Context(), cred, secret)
+	authz, needles, err := s.authorizationFor(r.Context(), cred, secret, host)
 	if err != nil {
 		deny(http.StatusBadGateway, err.Error())
 		return

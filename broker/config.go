@@ -75,11 +75,17 @@ type Credential struct {
 	// Methods, when set, restricts the HTTP methods (for example GET and
 	// HEAD for a read-only credential).
 	Methods []string `json:"methods,omitempty"`
+	// GitHubApp is the app of scheme github_app (see GitHubApp).
+	GitHubApp *GitHubApp `json:"github_app,omitempty"`
 	// Default marks the credential used on a host that several credentials
 	// serve for the same group, when the client does not name one. The
 	// client names a credential as the user name of the proxy
 	// (http://<credential>:<token>@broker).
 	Default bool `json:"default,omitempty"`
+
+	// template is the credential with {repo} in its name that this one was
+	// resolved from, for one repository.
+	template *Credential
 }
 
 var (
@@ -175,7 +181,7 @@ func (c *Config) Validate() error {
 	pairs := map[string][]*Credential{}
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
-		if !pathNameRE.MatchString(cr.Name) {
+		if !pathNameRE.MatchString(strings.Replace(cr.Name, repoPlaceholder, "repo", 1)) || (cr.isTemplate() && cr.Scheme != "github_app") {
 			return fmt.Errorf("credential %d: invalid name %q", i, cr.Name)
 		}
 		if strings.Contains(cr.Name, "/") && cr.Secret == "" {
@@ -202,8 +208,15 @@ func (c *Config) Validate() error {
 			if err != nil || u.Scheme != "https" || !hostRE.MatchString(u.Host) || cr.Username != "" {
 				return fmt.Errorf("credential %q: scheme oauth2 needs an https token_url and no username", cr.Name)
 			}
+		case "github_app":
+			if err := cr.validateGitHubApp(); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("credential %q: scheme must be bearer, basic or oauth2", cr.Name)
+			return fmt.Errorf("credential %q: scheme must be bearer, basic, oauth2 or github_app", cr.Name)
+		}
+		if cr.Scheme != "github_app" && cr.GitHubApp != nil {
+			return fmt.Errorf("credential %q: github_app is only used with scheme github_app", cr.Name)
 		}
 		if cr.Scheme != "oauth2" && cr.TokenURL != "" {
 			return fmt.Errorf("credential %q: token_url is only used with scheme oauth2", cr.Name)
@@ -224,8 +237,12 @@ func (c *Config) Validate() error {
 				if g == "" {
 					return fmt.Errorf("credential %q: empty group", cr.Name)
 				}
-				key := h + "\x00" + g
-				pairs[key] = append(pairs[key], cr)
+				// A template serves only when the client names it, so it
+				// never takes part in the choice of a default.
+				if !cr.isTemplate() {
+					key := h + "\x00" + g
+					pairs[key] = append(pairs[key], cr)
+				}
 			}
 		}
 	}
@@ -257,10 +274,22 @@ func (c *Config) hosts() []string {
 // credential, that one is used or nothing; otherwise the only credential, or
 // the default among several.
 func (c *Config) credentialFor(host string, groups []string, want string) (*Credential, string) {
+	if cr := c.resolveTemplate(want); cr != nil {
+		switch {
+		case !slices.Contains(cr.Hosts, host):
+			return nil, "the named credential does not serve this client on this host"
+		case !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(cr.Groups, g) }):
+			return nil, "the named credential does not serve this client on this host"
+		}
+		return cr, ""
+	}
 	var found, named, byDefault *Credential
 	known, wantIsName, n := false, false, 0
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
+		if cr.isTemplate() {
+			continue // serves only by one of its names, above
+		}
 		wantIsName = wantIsName || cr.Name == want
 		if !slices.Contains(cr.Hosts, host) {
 			continue
@@ -293,6 +322,17 @@ func (c *Config) credentialFor(host string, groups []string, want string) (*Cred
 	default:
 		return nil, "host is not configured"
 	}
+}
+
+// resolveTemplate returns the credential that name stands for through a
+// name with {repo}, or nil.
+func (c *Config) resolveTemplate(name string) *Credential {
+	for i := range c.Credentials {
+		if cr := c.Credentials[i].resolve(name); cr != nil {
+			return cr
+		}
+	}
+	return nil
 }
 
 func (cr *Credential) secretName() string {
@@ -365,6 +405,24 @@ func (c *Config) grantNamesAreUnique() error {
 		for i := range c.SSH.Targets {
 			if err := add(c.SSH.Targets[i].grantName()); err != nil {
 				return err
+			}
+		}
+	}
+	// A name with {repo} stands for many: none of them may be another
+	// thing's name, and two of them may not meet.
+	for i := range c.Credentials {
+		a := &c.Credentials[i]
+		if !a.isTemplate() {
+			continue
+		}
+		for name := range seen {
+			if a.resolve(name) != nil {
+				return fmt.Errorf("%q is also a name of %q", name, a.Name)
+			}
+		}
+		for j := i + 1; j < len(c.Credentials); j++ {
+			if b := &c.Credentials[j]; b.isTemplate() && templatesOverlap(a.Name, b.Name) {
+				return fmt.Errorf("%q and %q may name the same thing", a.Name, b.Name)
 			}
 		}
 	}

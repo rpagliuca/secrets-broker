@@ -132,9 +132,10 @@ Unknown fields are rejected.
 | `credentials[].name` | Name in the audit log, and the secret name unless `secret` is set |
 | `credentials[].hosts` | Exact, lower-case host names; no wildcard, no port |
 | `credentials[].groups` | Client groups allowed to use the credential |
-| `credentials[].scheme` | `bearer`, `basic` with `username`, or `oauth2` with `token_url` |
+| `credentials[].scheme` | `bearer`, `basic` with `username`, `oauth2` with `token_url`, or `github_app` with `github_app` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
 | `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
+| `credentials[].github_app` | For scheme `github_app` (see "GitHub App") |
 | `credentials[].default` | The one used when several credentials serve a host and the client names none |
 | `services` | Optional. Clients without a person, each with a fixed list (see "Services") |
 | `ssh` | Optional. Starts the SSH proxy (see "SSH") |
@@ -347,6 +348,51 @@ to the host of `token_url`. The broker exchanges the refresh token for an
 access token, keeps it in memory until it expires and sends it as `Bearer`.
 The client holds neither token; give it a placeholder.
 
+## GitHub App
+
+A personal access token reaches every repository of its account. A GitHub
+App can do better: the broker holds the private key of the app and, for each
+use, asks GitHub for an installation token limited to one repository and to
+the permissions of the credential. The token lasts one hour, lives only in
+the broker's memory and is renewed before it expires; the client holds
+neither the key nor the token, and what the token reaches is enforced by
+GitHub itself.
+
+```json
+{
+  "name": "team/github/{repo}/write",
+  "secret": "github-app",
+  "hosts": ["api.github.com", "github.com"],
+  "groups": ["team-a"],
+  "scheme": "github_app",
+  "github_app": {
+    "app_id": "123456",
+    "installation_id": 7890123,
+    "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}
+  }
+}
+```
+
+`{repo}` stands for any repository: the client asks for
+`team/github/secrets-broker/write`, and the request, the grant, the audit log
+and the token are for that repository alone. A name with `{repo}` serves only
+when the client names it (as the proxy user, or in `request`); it is never a
+default. Use one credential per level (read, write, workflows), all with the
+same secret. Without `{repo}`, `repositories` lists the repositories of the
+token, and without either the token reaches every repository of the
+installation.
+
+The secret is the private key file GitHub hands out (`.pem`), as it is,
+bound to the API host and to the git host. Requests to `api.github.com`
+carry `Bearer <token>`; requests to any other host of the credential, such
+as `github.com` for git over HTTPS, carry `Basic x-access-token:<token>`.
+For GitHub Enterprise, set `api_host`.
+
+Permissions are those of the GitHub API (`contents`, `pull_requests`,
+`issues`, `workflows`, ...), each `read` or `write`, at most what the app was
+installed with. Note that `contents: write` with `pull_requests: write` also
+merges pull requests: only branch protection on the repository stops that.
+
 ## Commands
 
 For what is neither a header nor SSH, such as a VPN, the broker can run a
@@ -553,8 +599,6 @@ func main() {
 
 ## Not in this version
 
-- Short-lived credentials issued by the service (cloud STS, app installation
-  tokens) instead of a stored secret.
 - Path rules per credential.
 - Pass-through for hosts without a credential, and an egress allow-list.
 
