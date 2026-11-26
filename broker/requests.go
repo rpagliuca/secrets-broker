@@ -49,7 +49,8 @@ func (c *Config) known(name string) bool {
 	}
 	return slices.ContainsFunc(c.AWS, func(a AWSAccount) bool { return a.grantName() == name }) ||
 		slices.ContainsFunc(c.Commands, func(cm Command) bool { return cm.grantName() == name }) ||
-		slices.ContainsFunc(c.Credentials, func(cr Credential) bool { return cr.Name == name })
+		slices.ContainsFunc(c.Credentials, func(cr Credential) bool { return cr.Name == name }) ||
+		c.resolveTemplate(name) != nil
 }
 
 // access serves the two calls a client uses to plan its work:
@@ -126,6 +127,12 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 		var hosts []string
 		for _, n := range in.Credentials {
 			h, ok := catalog[n]
+			if cr := cfg.resolveTemplate(n); !ok && cr != nil {
+				// A name with {repo} is in the catalog as written; what is
+				// asked for is one of its names.
+				_, ok = catalog[cr.template.Name]
+				h = cr.Hosts
+			}
 			if !ok {
 				deny(http.StatusBadRequest, "unknown name in the request; GET /grants lists what is available")
 				return
