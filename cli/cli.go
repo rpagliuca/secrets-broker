@@ -42,7 +42,7 @@ Commands sent to the control socket (-socket PATH):
   pending [json]         list the requests waiting for approval
   approve ID DURATION    grant a request, for example: approve 3f9a1c22 1h
   deny ID                refuse a request
-  grants                 list the grants in force
+  grants [json]          list the grants in force
   revoke PRINCIPAL|all   end grants before they expire
   blocked                list the clients kept from asking again after a refusal
   unblock PRINCIPAL|all  let them ask again at once (grants nothing)

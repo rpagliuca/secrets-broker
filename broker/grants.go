@@ -55,8 +55,12 @@ type Request struct {
 	Reasons map[string]string `json:"reasons,omitempty"`
 }
 
-// maxReason is how long a reason may be, in characters.
-const maxReason = 200
+// maxReason is how long a reason may be, in characters; minReason is how
+// short, when the configuration requires one.
+const (
+	maxReason = 200
+	minReason = 10
+)
 
 // cleanReason makes a reason safe to show on one line: no control
 // characters, single spaces, at most maxReason characters.
@@ -75,6 +79,11 @@ type Grant struct {
 	Principal  string    `json:"principal"`
 	Credential string    `json:"credential"`
 	Until      time.Time `json:"until"`
+	// Name is the display name the principal had when it asked.
+	Name string `json:"name,omitempty"`
+	// Reason is why the client said it wanted the credential, in the
+	// request that was granted: the client's own, unverified words.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ApprovalError is why a client without a grant was refused.
@@ -115,6 +124,10 @@ type Approval struct {
 	// service on their own, such as a status poller or a server listing
 	// its resources at start-up, no longer cause requests nobody made.
 	ExplicitOnly bool `json:"explicit_only,omitempty"`
+	// RequireReason refuses a request that does not say why the client
+	// wants each credential (at least minReason characters each). It
+	// implies ExplicitOnly: a request born from a use has no reason.
+	RequireReason bool `json:"require_reason,omitempty"`
 }
 
 // Duration is a time.Duration written as a string ("90m") in JSON.
@@ -178,6 +191,8 @@ type grantEntry struct {
 	until        time.Time // the grant, when in the future
 	blockedUntil time.Time // no new request before this
 	pending      string    // id of the waiting request
+	name         string    // of the principal, in the request that was granted
+	reason       string    // of the client, in the request that was granted
 }
 
 type pendingRequest struct {
@@ -347,6 +362,7 @@ func (g *Grants) Decide(id string, d time.Duration, by string) error {
 			e.blockedUntil = now.Add(g.cooldown)
 		} else {
 			e.until = now.Add(d)
+			e.name, e.reason = req.Principal.Name, req.Reasons[c]
 		}
 	}
 	if d == 0 {
@@ -448,7 +464,7 @@ func (g *Grants) Active() []Grant {
 	var out []Grant
 	for key, e := range g.entries {
 		if now.Before(e.until) {
-			out = append(out, Grant{key.principal, key.credential, e.until.UTC()})
+			out = append(out, Grant{Principal: key.principal, Credential: key.credential, Until: e.until.UTC(), Name: e.name, Reason: e.reason})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Until.Before(out[j].Until) })

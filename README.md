@@ -398,6 +398,11 @@ asking (see "Asking ahead"). Use it when clients run tools that touch a
 service on their own (a status poller, a server that lists its resources at
 start-up), which would otherwise cause requests nobody made.
 
+With `"require_reason": true` in `approval`, a request is refused unless it
+says why the client wants each credential (`NAME=WHY`, at least 10
+characters each). It implies `explicit_only`, since a request born from a
+use has no reason.
+
 ## Open credentials
 
 Some things are meant for every client, and are still worth keeping in the

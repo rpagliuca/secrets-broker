@@ -126,6 +126,13 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			return "", err
 		}
 		return fmt.Sprintf("ok: %d waiting\n%s", len(reqs), raw), nil
+	case cmd == "grants" && len(args) == 1 && args[0] == "json":
+		grants := c.Grants.Active()
+		raw, err := json.Marshal(grants)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("ok: %d in force\n%s", len(grants), raw), nil
 	case cmd == "grants" && len(args) == 0:
 		grants := c.Grants.Active()
 		out := fmt.Sprintf("ok: %d in force", len(grants))

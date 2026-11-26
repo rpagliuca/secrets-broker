@@ -118,7 +118,7 @@ func (s *services) Authorize(p Principal, credential string, hosts []string) err
 	if s.inner == nil || s.open(credential) {
 		return nil
 	}
-	if cfg := s.cfg(); cfg.Approval != nil && cfg.Approval.ExplicitOnly && !s.inner.Granted(p.ID, credential) {
+	if cfg := s.cfg(); cfg.Approval != nil && (cfg.Approval.ExplicitOnly || cfg.Approval.RequireReason) && !s.inner.Granted(p.ID, credential) {
 		return ErrNotGranted
 	}
 	return s.inner.Authorize(p, credential, hosts)
@@ -164,6 +164,18 @@ func (s *services) Request(p Principal, credentials, hosts []string, suggested t
 	credentials = slices.DeleteFunc(slices.Clone(credentials), s.open)
 	if len(credentials) == 0 {
 		return "", nil
+	}
+	if cfg := s.cfg(); cfg.Approval != nil && cfg.Approval.RequireReason {
+		var missing []string
+		for _, c := range credentials {
+			if len([]rune(cleanReason(reasons[c]))) < minReason {
+				missing = append(missing, c)
+			}
+		}
+		if len(missing) > 0 {
+			return "", fmt.Errorf("say why you want each credential, as NAME=WHY with at least %d characters; missing for: %s",
+				minReason, strings.Join(missing, ", "))
+		}
 	}
 	return r.Request(p, credentials, hosts, suggested, reasons)
 }
