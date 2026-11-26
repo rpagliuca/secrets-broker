@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -272,5 +273,66 @@ func TestUnblockEndsACooldown(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if len(n.ch) != 3 {
 		t.Fatalf("%d notifications, want 3", len(n.ch))
+	}
+}
+
+// A client may say why it wants each credential. The reason is cleaned, cut
+// and kept apart from what the broker itself says about the request.
+func TestRequestCarriesTheReasonsOfTheClient(t *testing.T) {
+	g, _, n, _ := newTestGrants()
+	p := Principal{ID: "agent-a", Name: "fix the build"}
+	long := strings.Repeat("x", 300)
+	_, err := g.Request(p, []string{"svc", "other"}, nil, time.Hour, map[string]string{
+		"svc":     "  open the pull request\nof the\tfix\x00 ",
+		"other":   long,
+		"unasked": "not part of the request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := <-n.ch
+	if got := req.Reasons["svc"]; got != "open the pull request of the fix" {
+		t.Errorf("reason = %q", got)
+	}
+	if got := req.Reasons["other"]; len(got) != 200 {
+		t.Errorf("long reason kept %d characters", len(got))
+	}
+	if _, ok := req.Reasons["unasked"]; ok || len(req.Reasons) != 2 {
+		t.Errorf("reasons = %v", req.Reasons)
+	}
+	// No reason, no map.
+	_, err = g.Request(Principal{ID: "agent-b"}, []string{"svc"}, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req := <-n.ch; req.Reasons != nil {
+		t.Errorf("reasons = %v", req.Reasons)
+	}
+}
+
+// "pending json" on the control socket gives a program the waiting requests
+// whole, reasons included.
+func TestControlListsPendingRequestsAsJSON(t *testing.T) {
+	g, _, _, _ := newTestGrants()
+	if _, err := g.Request(Principal{ID: "agent-a", Name: `fix "the" build`}, []string{"svc"}, []string{goodHost}, time.Hour,
+		map[string]string{"svc": "open the pull request"}); err != nil {
+		t.Fatal(err)
+	}
+	c := &Control{Grants: g}
+	out, err := c.run([]string{"pending", "json"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, raw, ok := strings.Cut(out, "\n")
+	if !ok || head != "ok: 1 waiting" {
+		t.Fatalf("reply = %q", out)
+	}
+	var reqs []Request
+	if err := json.Unmarshal([]byte(raw), &reqs); err != nil {
+		t.Fatalf("%v in %s", err, raw)
+	}
+	if len(reqs) != 1 || reqs[0].Principal.Name != `fix "the" build` || reqs[0].Reasons["svc"] != "open the pull request" ||
+		reqs[0].Suggested != time.Hour || len(reqs[0].Credentials) != 1 {
+		t.Fatalf("requests = %+v", reqs)
 	}
 }
