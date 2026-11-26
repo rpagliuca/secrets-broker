@@ -33,6 +33,8 @@ type fake struct {
 	polls     int
 	answer    string // action id to answer with, after the first poll
 	retracted string
+	lose      int // replies to "send" to drop after receiving the notification
+	sends     int
 }
 
 func newFake(t *testing.T) *fake {
@@ -44,6 +46,16 @@ func newFake(t *testing.T) *fake {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/notifications":
 			json.NewDecoder(r.Body).Decode(&f.sent)
+			f.sends++
+			if f.lose > 0 {
+				// The notification was taken, but the reply never arrives.
+				f.lose--
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					conn.Close()
+				}
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			io.WriteString(w, `{"id":1234,"answerable":true,"answer_cursor":"57","pushed":true}`)
 		case r.Method == "GET" && r.URL.Path == "/notifications/answers/1234":
@@ -130,6 +142,30 @@ func TestApproveFromThePhone(t *testing.T) {
 	}
 	if raw, _ := json.Marshal(f.sent); strings.Contains(string(raw), "hlk_") {
 		t.Error("the integration key is in the notification")
+	}
+}
+
+// The notification reaches the phone but the reply with its id is lost: the
+// broker must send again, or the answer on the phone is never read.
+func TestSendsAgainWhenTheReplyIsLost(t *testing.T) {
+	old := retryDelay
+	retryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { retryDelay = old })
+
+	f := newFake(t)
+	f.lose = 1
+	f.answer = "allow-3600"
+	g := broker.NewGrants(approval(), f.notifier(), nil)
+	p := broker.Principal{ID: "S-1", Name: "fix the build", Groups: []string{"team-a"}}
+
+	if err := g.Authorize(p, "svc", []string{"api.example.com"}); err == nil {
+		t.Fatal("authorised before any answer")
+	}
+	waitFor(t, "the grant", func() bool { return g.Authorize(p, "svc", nil) == nil })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sends != 2 {
+		t.Errorf("%d sends, want 2", f.sends)
 	}
 }
 

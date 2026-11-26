@@ -100,19 +100,38 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 		ID         json.Number `json:"id"`
 		Answerable bool        `json:"answerable"`
 	}
-	err = n.call(ctx, key, http.MethodPost, "/notifications", notification{
-		Title: title, Body: body, Level: level, CollapseID: req.ID, Actions: actions,
-		Source: "secrets-broker", SourceName: source,
-	}, &sent)
-	if err != nil {
-		return err
+	// Whatever happens, take the notification off the phone at the end: a
+	// stale request must not sit there looking answerable.
+	defer n.retract(key, req.ID)
+
+	// A notification can reach the phone although the reply to this call is
+	// lost, and without its id the answer cannot be read. So a failed send
+	// is repeated while the request is alive: the collapse id is the same,
+	// and the notification the broker ends up listening to takes the place
+	// of the one it lost.
+	for {
+		sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
+		err = n.call(sendCtx, key, http.MethodPost, "/notifications", notification{
+			Title: title, Body: body, Level: level, CollapseID: req.ID, Actions: actions,
+			Source: "secrets-broker", SourceName: source,
+		}, &sent)
+		cancel()
+		if err == nil {
+			break
+		}
+		if !transient(err) || ctx.Err() != nil {
+			return err
+		}
+		log.Printf("pushward: request %s: sending again: %v", req.ID, err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(retryDelay):
+		}
 	}
 	if sent.ID == "" || !sent.Answerable {
 		return errors.New("the notification was accepted but its answer will not be recorded")
 	}
-	// Whatever happens, take the notification off the phone at the end: a
-	// stale request must not sit there looking answerable.
-	defer n.retract(key, req.ID)
 
 	for ctx.Err() == nil {
 		var ans struct {
@@ -121,13 +140,12 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 		}
 		err := n.call(ctx, key, http.MethodGet, "/notifications/answers/"+url.PathEscape(sent.ID.String())+"?wait=25", nil, &ans)
 		if err != nil {
-			var se *statusError
-			if errors.As(err, &se) && se.code != http.StatusTooManyRequests && se.code < 500 {
+			if !transient(err) {
 				return err
 			}
-			select { // transient: try again while the request is alive
+			select { // try again while the request is alive
 			case <-ctx.Done():
-			case <-time.After(5 * time.Second):
+			case <-time.After(retryDelay):
 			}
 			continue
 		}
@@ -166,6 +184,23 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("PushWard answered %d: %s", e.code, e.body) }
+
+// transient reports whether a call is worth repeating: the network failed,
+// the reply did not come in time, or PushWard said to try later.
+func transient(err error) bool {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.code == http.StatusTooManyRequests || se.code >= 500
+	}
+	return true
+}
+
+// How long one attempt to send may take, and the pause before the next
+// attempt after a transient failure. Variables so that tests can shorten them.
+var (
+	sendTimeout = 15 * time.Second
+	retryDelay  = 5 * time.Second
+)
 
 func (n *Notifier) call(ctx context.Context, key, method, path string, in, out any) error {
 	var body io.Reader
