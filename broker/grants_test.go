@@ -354,3 +354,60 @@ func TestControlListsPendingRequestsAsJSON(t *testing.T) {
 		t.Fatalf("grants = %+v", grants)
 	}
 }
+
+// The approver may grant part of a request: the names left out are refused,
+// each with its cooldown, and the codes of the names left out are not used.
+func TestPartialGrant(t *testing.T) {
+	g, _, _, audit := newTestGrants()
+	var unlocked []string
+	g.CodeHooks(func(c string) bool { return c == "b" || c == "c" },
+		func(p Principal, c, code string, d time.Duration) (time.Time, error) {
+			unlocked = append(unlocked, c+"="+code)
+			return time.Time{}, nil
+		})
+	a := Principal{ID: "agent-a"}
+	id, err := g.Request(a, []string{"a", "b", "c"}, nil, 0, nil)
+	if err != nil || id == "" {
+		t.Fatalf("request: %q, %v", id, err)
+	}
+	// A name that is not in the request, or a missing code of a name that
+	// is granted, leaves the request waiting.
+	if err := g.DecideSome(id, time.Hour, "test", nil, []string{"a", "z"}); err == nil || !strings.Contains(err.Error(), "not in request") {
+		t.Fatalf("unknown name: %v", err)
+	}
+	if err := g.DecideSome(id, time.Hour, "test", nil, []string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "one-time code for: b") {
+		t.Fatalf("missing code: %v", err)
+	}
+	if len(g.Pending()) != 1 {
+		t.Fatal("the request is no longer waiting")
+	}
+	// a and b are granted; c is left out, and its code is not asked for.
+	if err := g.DecideSome(id, time.Hour, "test", map[string]string{"b": "123456"}, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Granted("agent-a", "a") || !g.Granted("agent-a", "b") || g.Granted("agent-a", "c") {
+		t.Fatal("want a and b granted, c not")
+	}
+	if len(unlocked) != 1 || unlocked[0] != "b=123456" {
+		t.Fatalf("codes used: %v", unlocked)
+	}
+	if len(g.Pending()) != 0 {
+		t.Fatal("the request is still waiting")
+	}
+	// c is in its cooldown: asking again is refused, and asking for the
+	// three asks nobody.
+	var ae *ApprovalError
+	if err := g.Authorize(a, "c", nil); !errors.As(err, &ae) || ae.RequestID != "" || ae.Until.IsZero() {
+		t.Fatalf("c after being left out: %v, want a cooldown", err)
+	}
+	if again, err := g.Request(a, []string{"a", "b", "c"}, nil, 0, nil); again != "" || !errors.As(err, &ae) {
+		t.Fatalf("asking again: %q, %v", again, err)
+	}
+	blocked := g.Blocked()
+	if len(blocked) != 1 || blocked[0].Credential != "c" {
+		t.Fatalf("blocked: %+v", blocked)
+	}
+	if !audit.has("granted", "for 1h0m0s, by test") || !audit.has("refused", "left out of the grant, by test") {
+		t.Error("the partial grant was not audited")
+	}
+}
