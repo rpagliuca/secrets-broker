@@ -40,6 +40,13 @@ type AWSAccount struct {
 	// approval they also end with the grant, but never last under 15m,
 	// which is the shortest session STS issues.
 	MaxDuration Duration `json:"max_duration,omitempty"`
+	// MFASerial is the serial number (ARN) of the MFA device the session
+	// must be opened with, for a role or a policy that requires MFA. The
+	// one-time code is typed by whoever approves the request, so such an
+	// account needs approval and cannot be granted from a notification
+	// button. The session is opened once, when the request is approved,
+	// and is not renewed: the grant ends with it.
+	MFASerial string `json:"mfa_serial,omitempty"`
 }
 
 var awsRegionRE = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]$`)
@@ -171,8 +178,15 @@ func (s *Server) aws(w http.ResponseWriter, r *http.Request) {
 	s.cacheMu.Lock()
 	creds, hit := s.awsCache[key]
 	s.cacheMu.Unlock()
-	if !hit || time.Until(creds.Expiration) < 5*time.Minute {
-		creds, err = stsSession(r.Context(), s.Transport, acct, keyID, secretKey, d, p.ID, time.Now())
+	if acct.MFASerial != "" {
+		// The session was opened with the one-time code when the request
+		// was approved. The broker cannot open another on its own.
+		if s.Approver == nil || !hit || !time.Now().Before(creds.Expiration) {
+			deny(http.StatusForbidden, "the session opened with the one-time code is over; ask again")
+			return
+		}
+	} else if !hit || time.Until(creds.Expiration) < 5*time.Minute {
+		creds, err = stsSession(r.Context(), s.Transport, acct, keyID, secretKey, d, p.ID, "", time.Now())
 		if err != nil {
 			deny(http.StatusBadGateway, "upstream: "+err.Error())
 			return
@@ -191,6 +205,64 @@ func (s *Server) aws(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(creds)
 }
 
+var oneTimeCodeRE = regexp.MustCompile(`^[0-9]{6,8}$`)
+
+// needsCode reports whether a credential, by the name used in grants, can
+// only be granted with a one-time code: an AWS account with an MFA device.
+func (s *Server) needsCode(credential string) bool {
+	name, ok := strings.CutPrefix(credential, "aws:")
+	if !ok {
+		return false
+	}
+	cfg, _ := s.state()
+	for i := range cfg.AWS {
+		if cfg.AWS[i].Name == name {
+			return cfg.AWS[i].MFASerial != ""
+		}
+	}
+	return false
+}
+
+// unlockWithCode opens the AWS session of an account with an MFA device,
+// with the one-time code typed by the approver, and keeps it for the
+// client. It returns when the session ends: the grant must not outlive it.
+func (s *Server) unlockWithCode(p Principal, credential, code string, d time.Duration) (time.Time, error) {
+	name := strings.TrimPrefix(credential, "aws:")
+	cfg, _ := s.state()
+	acct := cfg.awsAccount(name, p.Groups)
+	if acct == nil || acct.MFASerial == "" {
+		return time.Time{}, fmt.Errorf("%s takes no one-time code", credential)
+	}
+	if !oneTimeCodeRE.MatchString(code) {
+		return time.Time{}, fmt.Errorf("the one-time code for %s must be 6 to 8 digits", credential)
+	}
+	sec, err := s.store.Get(acct.secretName())
+	if err == nil && !slices.Contains(sec.Hosts, acct.stsHost()) {
+		err = errHostNotBound
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	keyID, secretKey, ok := strings.Cut(string(sec.Value), ":")
+	if !ok || keyID == "" || secretKey == "" {
+		return time.Time{}, errors.New("the secret is not ACCESS_KEY_ID:SECRET_ACCESS_KEY")
+	}
+	d = max(min(d, acct.maxDuration()), awsMinSession).Truncate(time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	creds, err := stsSession(ctx, s.Transport, acct, keyID, secretKey, d, p.ID, code, time.Now())
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s: %w (wrong or used one-time code?)", credential, err)
+	}
+	s.cacheMu.Lock()
+	if s.awsCache == nil {
+		s.awsCache = map[string]awsCredentials{}
+	}
+	s.awsCache[p.ID+"\x00"+acct.Name] = creds
+	s.cacheMu.Unlock()
+	return creds.Expiration, nil
+}
+
 // forget drops what was derived from secrets and is kept between requests.
 func (s *Server) forget() {
 	s.cacheMu.Lock()
@@ -204,9 +276,14 @@ var (
 )
 
 // stsSession asks STS for temporary credentials, signing with the long-term
-// key. Only the error code of a refusal is kept.
-func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID, secretKey string, d time.Duration, client string, now time.Time) (awsCredentials, error) {
+// key. code is the one-time code of the MFA device of the account, when it
+// has one. Only the error code of a refusal is kept.
+func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID, secretKey string, d time.Duration, client, code string, now time.Time) (awsCredentials, error) {
 	form := url.Values{"Version": {"2011-06-15"}, "DurationSeconds": {strconv.Itoa(int(d.Seconds()))}}
+	if a.MFASerial != "" {
+		form.Set("SerialNumber", a.MFASerial)
+		form.Set("TokenCode", code)
+	}
 	if a.RoleARN != "" {
 		name := awsSessionNameRE.ReplaceAllString(client, "-")
 		form.Set("Action", "AssumeRole")

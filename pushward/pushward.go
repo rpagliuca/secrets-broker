@@ -87,6 +87,12 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 	if len(durations) > 9 {
 		durations = durations[:9]
 	}
+	if len(req.NeedsCode) > 0 {
+		// A button cannot carry the one-time code the request needs: from
+		// here it can only be refused. It is granted where the code can be
+		// typed.
+		durations = nil
+	}
 	for _, d := range durations {
 		id := "allow-" + strconv.FormatInt(int64(d/time.Second), 10)
 		choices[id] = d
@@ -315,6 +321,9 @@ func (n *Notifier) text(req broker.Request) (string, string) {
 	what := strings.Join(req.Credentials, ", ")
 	if req.Suggested > 0 {
 		what += " for " + Short(req.Suggested)
+	}
+	if len(req.NeedsCode) > 0 {
+		what += "; needs a one-time code, so approve it on the broker"
 	}
 	return "Credential request", fmt.Sprintf("%s asks for %s (%s)", who, what, req.Principal.ID)
 }

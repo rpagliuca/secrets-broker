@@ -635,3 +635,85 @@ func TestRequireReasonRefusesARequestWithoutOne(t *testing.T) {
 		t.Fatalf("reasons = %v", req.Reasons)
 	}
 }
+
+// An account with an MFA device is granted only with the one-time code the
+// approver types. The session is opened once, at the approval, and the
+// grant ends with it.
+func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
+	h, calls := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.AWS = []AWSAccount{{Name: "audit", Groups: []string{"team-a"}, RoleARN: "arn:aws:iam::123456789012:role/read-only",
+		MFASerial: "arn:aws:iam::123456789012:mfa/key-1", MaxDuration: Duration(time.Hour)}}
+	next.Approval = &Approval{Durations: []Duration{Duration(4 * time.Hour)}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	h.store.m["audit"] = Secret{Value: []byte(awsKeyID + ":" + awsSecretKey), Hosts: []string{"sts.us-east-1.amazonaws.com"}}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(*next.Approval, n, h.audit)
+	g.CodeHooks(h.srv.needsCode, h.srv.unlockWithCode)
+	h.srv.Approver = g
+
+	// The use asks the approver; the request says it needs a code.
+	if code, _ := h.aws("audit", "token-a"); code != 403 {
+		t.Fatalf("before the grant: %d", code)
+	}
+	req := <-n.ch
+	if len(req.NeedsCode) != 1 || req.NeedsCode[0] != "aws:audit" {
+		t.Fatalf("needs code = %v", req.NeedsCode)
+	}
+	// Without the code, or with something that is not one, nothing is granted
+	// and the request keeps waiting.
+	c := &Control{Grants: g}
+	for _, args := range [][]string{
+		{"approve", req.ID, "4h"},
+		{"approve", req.ID, "4h", "aws:audit=abc"},
+		{"approve", req.ID, "4h", "other=123456"},
+	} {
+		if out, err := c.run(args, nil); err == nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	if err := g.Decide(req.ID, 4*time.Hour, "a button"); err == nil {
+		t.Fatal("granted without a code")
+	}
+	if len(g.Pending()) != 1 || len(*calls) != 0 || g.Granted("agent-a", "aws:audit") {
+		t.Fatalf("%d pending, %d STS calls", len(g.Pending()), len(*calls))
+	}
+	// With the code, the broker opens the session then and there.
+	if out, err := c.run([]string{"approve", req.ID, "4h", "aws:audit=123456"}, nil); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("%d STS calls", len(*calls))
+	}
+	form := (*calls)[0]
+	if form.Get("Action") != "AssumeRole" || form.Get("SerialNumber") != "arn:aws:iam::123456789012:mfa/key-1" ||
+		form.Get("TokenCode") != "123456" || form.Get("DurationSeconds") != "3600" {
+		t.Fatalf("STS call = %v", form)
+	}
+	// The grant asked for was 4 h; it ends with the session, in 1 h.
+	grants := g.Active()
+	if len(grants) != 1 || time.Until(grants[0].Until) > time.Hour+time.Minute {
+		t.Fatalf("grants = %+v", grants)
+	}
+	// The client gets that session, and asking again opens no other.
+	for range 2 {
+		code, body := h.aws("audit", "token-a")
+		if code != 200 || !strings.Contains(body, "ASIATEMP") {
+			t.Fatalf("%d %s", code, body)
+		}
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("%d STS calls after two uses", len(*calls))
+	}
+	// When the session is gone the broker cannot open another on its own.
+	h.srv.forget()
+	if code, body := h.aws("audit", "token-a"); code != 403 || !strings.Contains(body, "ask again") {
+		t.Fatalf("after the session: %d %s", code, body)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("%d STS calls", len(*calls))
+	}
+}

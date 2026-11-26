@@ -140,12 +140,24 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			out += fmt.Sprintf("\n%s  credential=%s  until=%s", g.Principal, g.Credential, g.Until.Format(time.RFC3339))
 		}
 		return out, nil
-	case cmd == "approve" && len(args) == 2:
+	case cmd == "approve" && len(args) >= 2:
 		d, err := time.ParseDuration(args[1])
 		if err != nil || d <= 0 {
 			return "", errors.New("approve needs a positive duration, such as 1h")
 		}
-		if err := c.Grants.Decide(args[0], d, "control socket"); err != nil {
+		// NAME=CODE gives the one-time code of a credential that needs one.
+		var codes map[string]string
+		for _, a := range args[2:] {
+			name, code, ok := strings.Cut(a, "=")
+			if !ok || name == "" || code == "" {
+				return "", errors.New("after the duration, approve takes one-time codes as NAME=CODE")
+			}
+			if codes == nil {
+				codes = map[string]string{}
+			}
+			codes[name] = code
+		}
+		if err := c.Grants.DecideWith(args[0], d, "control socket", codes); err != nil {
 			return "", err
 		}
 		return "ok: granted for " + d.String(), nil

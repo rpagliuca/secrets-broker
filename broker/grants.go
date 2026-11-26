@@ -53,6 +53,9 @@ type Request struct {
 	// is the only text in a request written by the client: whatever shows
 	// it must mark it as the client's own, unverified words.
 	Reasons map[string]string `json:"reasons,omitempty"`
+	// NeedsCode lists the credentials of the request that can only be
+	// granted with a one-time code typed by the approver (see CodeHooks).
+	NeedsCode []string `json:"needs_code,omitempty"`
 }
 
 // maxReason is how long a reason may be, in characters; minReason is how
@@ -180,9 +183,23 @@ type Grants struct {
 	audit     Auditor
 	now       func() time.Time
 
+	// needsCode and unlock are the CodeHooks.
+	needsCode func(credential string) bool
+	unlock    func(p Principal, credential, code string, d time.Duration) (time.Time, error)
+
 	mu      sync.Mutex
 	entries map[grantKey]*grantEntry
 	pending map[string]*pendingRequest
+}
+
+// CodeHooks teaches the grants about credentials that need a one-time code
+// from the approver, such as an AWS account with an MFA device. needs says
+// whether a credential is one of those. unlock is called when a request is
+// approved, with the code the approver typed: it does what the code is for
+// and returns when what it opened ends (zero for no limit), or an error,
+// which leaves the request waiting. Call it before the first request.
+func (g *Grants) CodeHooks(needs func(credential string) bool, unlock func(p Principal, credential, code string, d time.Duration) (time.Time, error)) {
+	g.needsCode, g.unlock = needs, unlock
 }
 
 type grantKey struct{ principal, credential string }
@@ -262,6 +279,9 @@ func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, su
 	req := Request{ID: hex.EncodeToString(raw), Principal: p, Credential: credentials[0], Credentials: credentials,
 		Hosts: hosts, Created: now.UTC(), Suggested: suggested}
 	for _, c := range credentials {
+		if g.needsCode != nil && g.needsCode(c) {
+			req.NeedsCode = append(req.NeedsCode, c)
+		}
 		if why := cleanReason(reasons[c]); why != "" {
 			if req.Reasons == nil {
 				req.Reasons = map[string]string{}
@@ -344,6 +364,50 @@ func (g *Grants) Until(principal, credential string) time.Time {
 // Decide answers a waiting request: a positive duration grants it for that
 // long, zero refuses it. by says who answered, for the audit log.
 func (g *Grants) Decide(id string, d time.Duration, by string) error {
+	return g.DecideWith(id, d, by, nil)
+}
+
+// DecideWith is Decide with the one-time codes the approver typed, by
+// credential, for a request that needs them. Granting such a request
+// without its codes, or with a code that does not work, is an error and
+// leaves the request waiting.
+func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[string]string) error {
+	if d < 0 || d > maxGrant {
+		return fmt.Errorf("duration must be between 0 and %s", maxGrant)
+	}
+	// What a code opens may end before the grant asked for; the grant of
+	// that credential then ends with it. The codes are used before the
+	// lock is taken: using one is a call to another service.
+	limits := map[string]time.Time{}
+	if d > 0 {
+		g.mu.Lock()
+		g.expire(g.now())
+		var waiting *Request
+		if req := g.pending[id]; req != nil {
+			copied := req.Request
+			waiting = &copied
+		}
+		g.mu.Unlock()
+		if waiting == nil {
+			return fmt.Errorf("no waiting request %q (answered or expired)", id)
+		}
+		var missing []string
+		for _, c := range waiting.NeedsCode {
+			if codes[c] == "" {
+				missing = append(missing, c)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("the request needs a one-time code for: %s (approve %s %s NAME=CODE)", strings.Join(missing, ", "), id, d)
+		}
+		for _, c := range waiting.NeedsCode {
+			until, err := g.unlock(waiting.Principal, c, codes[c], d)
+			if err != nil {
+				return err
+			}
+			limits[c] = until
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
@@ -352,9 +416,6 @@ func (g *Grants) Decide(id string, d time.Duration, by string) error {
 	if req == nil {
 		return fmt.Errorf("no waiting request %q (answered or expired)", id)
 	}
-	if d < 0 || d > maxGrant {
-		return fmt.Errorf("duration must be between 0 and %s", maxGrant)
-	}
 	g.drop(req)
 	for _, c := range req.Credentials {
 		e := g.entries[grantKey{req.Principal.ID, c}]
@@ -362,6 +423,9 @@ func (g *Grants) Decide(id string, d time.Duration, by string) error {
 			e.blockedUntil = now.Add(g.cooldown)
 		} else {
 			e.until = now.Add(d)
+			if limit := limits[c]; !limit.IsZero() && limit.Before(e.until) {
+				e.until = limit
+			}
 			e.name, e.reason = req.Principal.Name, req.Reasons[c]
 		}
 	}

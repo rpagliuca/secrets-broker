@@ -243,3 +243,29 @@ func TestShort(t *testing.T) {
 		}
 	}
 }
+
+// A request that needs a one-time code cannot be granted from a button.
+func TestRequestThatNeedsACodeOnlyHasTheDenyButton(t *testing.T) {
+	f := newFake(t)
+	g := broker.NewGrants(approval(), f.notifier(), nil)
+	g.CodeHooks(func(c string) bool { return c == "aws:audit" },
+		func(broker.Principal, string, string, time.Duration) (time.Time, error) { return time.Time{}, nil })
+	p := broker.Principal{ID: "S-1", Name: "fix the build", Groups: []string{"team-a"}}
+	if err := g.Authorize(p, "aws:audit", []string{"sts.example.com"}); err == nil {
+		t.Fatal("authorised before any answer")
+	}
+	waitFor(t, "the notification", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.sends == 1
+	})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	actions := f.sent["actions"].([]any)
+	if len(actions) != 1 || actions[0].(map[string]any)["id"] != "deny" {
+		t.Fatalf("buttons = %v", actions)
+	}
+	if body, _ := f.sent["body"].(string); !strings.Contains(body, "one-time code") {
+		t.Errorf("body = %q", body)
+	}
+}
