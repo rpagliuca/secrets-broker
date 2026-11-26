@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -254,7 +255,7 @@ func (s *Server) unlockWithCode(p Principal, credential, code string, d time.Dur
 	defer cancel()
 	creds, err := stsSession(ctx, s.Transport, acct, keyID, secretKey, d, p.ID, code, time.Now())
 	if err != nil {
-		return time.Time{}, fmt.Errorf("%s: %w (wrong or used one-time code?)", credential, err)
+		return time.Time{}, fmt.Errorf("%s: %w", credential, err)
 	}
 	s.cacheMu.Lock()
 	if s.awsCache == nil {
@@ -275,6 +276,9 @@ func (s *Server) forget() {
 var (
 	awsSessionNameRE = regexp.MustCompile(`[^\w+=,.@-]`)
 	awsErrorCodeRE   = regexp.MustCompile(`<Code>([A-Za-z0-9.]+)</Code>`)
+	// STS explains a refusal in <Message>: it tells a wrong one-time code
+	// from a wrong device serial. It names no secret.
+	awsErrorMessageRE = regexp.MustCompile(`<Message>([^<]{1,300})</Message>`)
 )
 
 // stsSession asks STS for temporary credentials, signing with the long-term
@@ -312,7 +316,7 @@ func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID,
 		if m := awsErrorCodeRE.FindSubmatch(data); m != nil {
 			code = string(m[1])
 		}
-		return awsCredentials{}, fmt.Errorf("STS answered %d (%s)", resp.StatusCode, code)
+		return awsCredentials{}, fmt.Errorf("STS answered %d (%s)", resp.StatusCode, code+stsErrorMessage(data))
 	}
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
@@ -363,4 +367,18 @@ func signV4(req *http.Request, body, keyID, secretKey, region, service string, n
 	key := mac(mac(mac(mac([]byte("AWS4"+secretKey), date), region), service), "aws4_request")
 	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+keyID+"/"+scope+
 		", SignedHeaders="+signed+", Signature="+hex.EncodeToString(mac(key, toSign)))
+}
+
+// stsErrorMessage is the explanation STS gave with an error, as ": text" on
+// one line, or "" when there is none.
+func stsErrorMessage(data []byte) string {
+	m := awsErrorMessageRE.FindSubmatch(data)
+	if m == nil {
+		return ""
+	}
+	msg := strings.Join(strings.Fields(html.UnescapeString(string(m[1]))), " ")
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
 }

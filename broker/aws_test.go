@@ -776,3 +776,21 @@ func TestPathNamesAreUsedWhole(t *testing.T) {
 		t.Errorf("same name twice: %v", err)
 	}
 }
+
+// The explanation STS gives with a refusal reaches the approver: it tells a
+// wrong one-time code from a wrong device serial.
+func TestSTSErrorCarriesTheMessage(t *testing.T) {
+	rt := rtFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 403, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(
+			"<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>MultiFactorAuthentication failed,\n unable to validate MFA code.  Please verify your MFA serial number is valid &amp; associated with this user.</Message></Error></ErrorResponse>"))}, nil
+	})
+	acct := &AWSAccount{Name: "audit", MFASerial: "arn:aws:iam::123456789012:mfa/key-1"}
+	_, err := stsSession(context.Background(), rt, acct, awsKeyID, awsSecretKey, time.Hour, "agent-a", "123456", time.Now())
+	want := "STS answered 403 (AccessDenied: MultiFactorAuthentication failed, unable to validate MFA code. Please verify your MFA serial number is valid & associated with this user.)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("%v", err)
+	}
+	if got := stsErrorMessage([]byte("<Error><Code>Throttling</Code></Error>")); got != "" {
+		t.Fatalf("%q", got)
+	}
+}
