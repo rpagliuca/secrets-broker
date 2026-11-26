@@ -269,3 +269,28 @@ func TestRequestThatNeedsACodeOnlyHasTheDenyButton(t *testing.T) {
 		t.Errorf("body = %q", body)
 	}
 }
+
+// The buttons never change places: whatever the client suggested, the
+// durations come in the configured order.
+func TestButtonsKeepTheirOrder(t *testing.T) {
+	f := newFake(t)
+	g := broker.NewGrants(approval(), f.notifier(), nil) // 1 h and 4 h
+	p := broker.Principal{ID: "S-1", Name: "fix the build", Groups: []string{"team-a"}}
+	if _, err := g.Request(p, []string{"svc"}, []string{"api.example.com"}, 4*time.Hour, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the notification", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.sends == 1
+	})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var titles []string
+	for _, a := range f.sent["actions"].([]any) {
+		titles = append(titles, a.(map[string]any)["title"].(string))
+	}
+	if got := strings.Join(titles, ","); got != "Deny,1 h,4 h" {
+		t.Fatalf("buttons = %s", got)
+	}
+}

@@ -398,7 +398,7 @@ secrets-broker request -for 4h issues-team-a ssh:web aws:prod
 
 (`GET /grants` and `POST /requests` with `Authorization: Bearer <token>`;
 both commands take `-token-env NAME`.) The approver gets one question with
-every name and the suggested duration, which becomes the first button; one
+every name and the suggested duration (the buttons keep their order); one
 answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
 `aws:<account>` and `command:<name>`. The client names things and suggests a
 duration. It may also say why it wants each name, as `NAME=WHY` (200

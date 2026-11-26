@@ -77,13 +77,11 @@ func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request
 	}
 	choices := map[string]time.Duration{"deny": 0}
 	actions := []action{{ID: "deny", Title: n.denyLabel(), Destructive: true, Unlock: !n.NoUnlock}}
-	// The duration the client suggested comes first, then every configured
-	// choice. PushWard accepts ten buttons, one of which is the refusal.
+	// Every configured choice, always in the configured order: the buttons
+	// must not change places from one request to the next, whatever the
+	// client suggested (the suggestion is in the text). PushWard accepts ten
+	// buttons, one of which is the refusal.
 	durations := g.Durations()
-	if s := req.Suggested; s > 0 {
-		durations = slices.DeleteFunc(slices.Clone(durations), func(d time.Duration) bool { return d == s })
-		durations = append([]time.Duration{s}, durations...)
-	}
 	if len(durations) > 9 {
 		durations = durations[:9]
 	}
