@@ -418,6 +418,23 @@ says why the client wants each credential (`NAME=WHY`, at least 10
 characters each). It implies `explicit_only`, since a request born from a
 use has no reason.
 
+## Names that say what they give
+
+The approver decides by the name. A plain name gets its kind in front
+(`ssh:web`, `aws:prod`, `command:vpn`), which says how it is used but not
+what it reaches. A name may instead be a path, and is then used whole, in
+requests, grants, the log and the client's commands:
+
+```json
+{"name": "team/github/ssh/all-repositories", "secret": "ssh-deploy", "address": "github.com:22", "...": "..."}
+```
+
+Write the path so that its last part states the most the thing gives access
+to if misused, not what it is meant for: `team/aws/prod/read-only`,
+`team/github/api-token/every-repository-and-workflow`. A name that is a path
+needs `secret`, because the secret store has flat names, and no two things
+may share a name. In a proxy URL the slashes of the name are written `%2F`.
+
 ## Open credentials
 
 Some things are meant for every client, and are still worth keeping in the

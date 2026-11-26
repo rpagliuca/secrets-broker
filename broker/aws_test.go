@@ -717,3 +717,62 @@ func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
 		t.Fatalf("%d STS calls", len(*calls))
 	}
 }
+
+// A name may be a path. It is then used whole in grants and requests,
+// without the kind in front, and the HTTP paths take it as it is.
+func TestPathNamesAreUsedWhole(t *testing.T) {
+	if grantName("ssh", "web") != "ssh:web" || grantName("ssh", "team/ssh/web/shell") != "team/ssh/web/shell" || grantName("", "svc") != "svc" {
+		t.Fatal("grantName")
+	}
+	h, calls := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.AWS = []AWSAccount{{Name: "team/aws/prod/read-only", Secret: "prod", Groups: []string{"team-a"}}}
+	next.Approval = &Approval{Durations: []Duration{Duration(time.Hour)}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(*next.Approval, n, h.audit)
+	g.CodeHooks(h.srv.needsCode, h.srv.unlockWithCode)
+	h.srv.Approver = g
+
+	req, _ := http.NewRequest("GET", h.broker.URL+"/grants", nil)
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(listing), `"team/aws/prod/read-only"`) || strings.Contains(string(listing), "aws:team") {
+		t.Fatalf("catalog = %s", listing)
+	}
+	if code, _ := h.aws("team/aws/prod/read-only", "token-a"); code != 403 {
+		t.Fatalf("before the grant: %d", code)
+	}
+	asked := <-n.ch
+	if asked.Credential != "team/aws/prod/read-only" {
+		t.Fatalf("asked for %q", asked.Credential)
+	}
+	g.Decide(asked.ID, time.Hour, "test")
+	if code, body := h.aws("team/aws/prod/read-only", "token-a"); code != 200 || len(*calls) != 1 {
+		t.Fatalf("after the grant: %d %s, %d STS calls", code, body, len(*calls))
+	}
+	if !cfg.known("svc") || !next.known("team/aws/prod/read-only") || next.known("aws:team/aws/prod/read-only") {
+		t.Error("known")
+	}
+
+	// A path needs its secret named, and no two things share a name.
+	bad := next
+	bad.AWS = []AWSAccount{{Name: "team/aws/prod/read-only", Groups: []string{"team-a"}}}
+	if err := h.srv.SetConfig(&bad); err == nil || !strings.Contains(err.Error(), "needs \"secret\"") {
+		t.Errorf("path without secret: %v", err)
+	}
+	twice := next
+	twice.Commands = []Command{{Name: "team/aws/prod/read-only", Groups: []string{"team-a"}, Start: []string{"/bin/true"}, Stop: []string{"/bin/true"}}}
+	twice.CommandsDir = t.TempDir()
+	if err := h.srv.SetConfig(&twice); err == nil || !strings.Contains(err.Error(), "more than one thing") {
+		t.Errorf("same name twice: %v", err)
+	}
+}
