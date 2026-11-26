@@ -324,6 +324,21 @@ expires. The session lasts at most `max_duration` (default 1h) and ends with
 the grant, but never lasts under 15 minutes, the shortest STS issues: a
 revoked client keeps its session for up to that long.
 
+For a role or a policy that requires MFA, add the device to the account:
+
+```json
+{"name": "audit", "groups": ["team-a"], "role_arn": "arn:aws:iam::123456789012:role/read-only",
+ "mfa_serial": "arn:aws:iam::123456789012:mfa/key-1"}
+```
+
+Such an account needs approval. Its request cannot be granted from a
+notification button, which has nowhere to type: the approver gives the
+one-time code with the answer, `secrets-broker approve 3f9a1c22 1h
+aws:audit=123456`. The broker opens the session with that code then and
+there, hands it to the client while the grant lasts and cannot renew it: the
+grant ends with the session (`max_duration`), and the client asks again.
+A wrong or used code leaves the request waiting.
+
 ## OAuth
 
 With `"scheme": "oauth2"` and a `token_url`, the secret is

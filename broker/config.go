@@ -138,6 +138,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("aws account %q: duplicate name", c.AWS[i].Name)
 		}
 		awsNames[c.AWS[i].Name] = true
+		if c.AWS[i].MFASerial != "" && c.Approval == nil {
+			return fmt.Errorf("aws account %q: mfa_serial needs approval, which is where the one-time code is typed", c.AWS[i].Name)
+		}
 	}
 	cmdNames := map[string]bool{}
 	for i := range c.Commands {

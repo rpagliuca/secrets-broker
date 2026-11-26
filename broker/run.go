@@ -54,6 +54,7 @@ func Run(ctx context.Context, o Options) error {
 	ctl.Unsealer, _ = o.Store.(Unsealer)
 	if o.Config.Approval != nil {
 		ctl.Grants = NewGrants(*o.Config.Approval, o.Notifier, o.Audit)
+		ctl.Grants.CodeHooks(srv.needsCode, srv.unlockWithCode)
 		srv.Approver = ctl.Grants
 	}
 
