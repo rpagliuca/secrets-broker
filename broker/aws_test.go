@@ -583,3 +583,55 @@ func TestExplicitOnlyNeverAsksOnUse(t *testing.T) {
 		t.Fatalf("after the grant: %d %s", code, body)
 	}
 }
+
+// With require_reason nothing is asked of the approver unless the client
+// says why it wants each credential.
+func TestRequireReasonRefusesARequestWithoutOne(t *testing.T) {
+	h, _ := awsHarness(t)
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.Approval = &Approval{Durations: []Duration{Duration(time.Hour)}, RequireReason: true}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	n := &notified{ch: make(chan Request, 10)}
+	g := NewGrants(*next.Approval, n, h.audit)
+	sv := &services{cfg: func() *Config { c, _ := h.srv.state(); return c }, auth: h.srv.auth, inner: g}
+	h.srv.auth, h.srv.Approver = sv, sv
+	ask := func(body string) (int, string) {
+		req, _ := http.NewRequest("POST", h.broker.URL+"/requests", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer token-a")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+
+	// A use without a grant asks nobody, as with explicit_only.
+	if code, body := h.aws("prod", "token-a"); code != 403 || !strings.Contains(body, "ask first") {
+		t.Fatalf("%d %s", code, body)
+	}
+	for _, body := range []string{
+		`{"credentials":["svc","aws:prod"],"duration":"1h"}`,
+		`{"credentials":["svc","aws:prod"],"reasons":{"svc":"read the open pull request"}}`,
+		`{"credentials":["svc","aws:prod"],"reasons":{"svc":"read the open pull request","aws:prod":"  x  "}}`,
+	} {
+		code, out := ask(body)
+		if code != 400 || !strings.Contains(out, "missing for:") || !strings.Contains(out, "aws:prod") {
+			t.Errorf("%s: %d %s", body, code, out)
+		}
+	}
+	if len(n.ch) != 0 || len(g.Pending()) != 0 {
+		t.Fatalf("%d notifications, %d pending", len(n.ch), len(g.Pending()))
+	}
+	code, out := ask(`{"credentials":["svc","aws:prod"],"reasons":{"svc":"read the open pull request","aws:prod":"list the buckets of the backup"}}`)
+	if code != 200 || !strings.Contains(out, `"request"`) {
+		t.Fatalf("%d %s", code, out)
+	}
+	if req := <-n.ch; len(req.Reasons) != 2 {
+		t.Fatalf("reasons = %v", req.Reasons)
+	}
+}

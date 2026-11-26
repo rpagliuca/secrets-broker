@@ -55,8 +55,12 @@ type Request struct {
 	Reasons map[string]string `json:"reasons,omitempty"`
 }
 
-// maxReason is how long a reason may be, in characters.
-const maxReason = 200
+// maxReason is how long a reason may be, in characters; minReason is how
+// short, when the configuration requires one.
+const (
+	maxReason = 200
+	minReason = 10
+)
 
 // cleanReason makes a reason safe to show on one line: no control
 // characters, single spaces, at most maxReason characters.
@@ -115,6 +119,10 @@ type Approval struct {
 	// service on their own, such as a status poller or a server listing
 	// its resources at start-up, no longer cause requests nobody made.
 	ExplicitOnly bool `json:"explicit_only,omitempty"`
+	// RequireReason refuses a request that does not say why the client
+	// wants each credential (at least minReason characters each). It
+	// implies ExplicitOnly: a request born from a use has no reason.
+	RequireReason bool `json:"require_reason,omitempty"`
 }
 
 // Duration is a time.Duration written as a string ("90m") in JSON.
