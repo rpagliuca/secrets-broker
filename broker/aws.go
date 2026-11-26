@@ -267,10 +267,12 @@ func (s *Server) unlockWithCode(p Principal, credential, code string, d time.Dur
 }
 
 // forget drops what was derived from secrets and is kept between requests.
+// Sealed, the broker cannot delete the tokens it issued: they end at their
+// expiry.
 func (s *Server) forget() {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	s.awsCache, s.oauthCache = nil, nil
+	s.awsCache, s.oauthCache, s.cfCache = nil, nil, nil
 }
 
 var (

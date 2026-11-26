@@ -20,7 +20,10 @@ type oauthToken struct {
 
 // authorizationFor returns the Authorization header of a credential and the
 // values that must never come back in a response.
-func (s *Server) authorizationFor(ctx context.Context, cred *Credential, sec Secret, host string) (string, [][]byte, error) {
+func (s *Server) authorizationFor(ctx context.Context, p Principal, cred *Credential, sec Secret, host string) (string, [][]byte, error) {
+	if cred.Scheme == "cloudflare_token" {
+		return s.cloudflareAuthorization(ctx, p, cred, sec)
+	}
 	if cred.Scheme == "github_app" {
 		return s.githubAppAuthorization(ctx, cred, sec, host)
 	}

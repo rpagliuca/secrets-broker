@@ -107,8 +107,11 @@ func Run(ctx context.Context, o Options) error {
 	watched := make(chan struct{})
 	wctx, stopWatch := context.WithCancel(context.Background())
 	go func() { srv.WatchCommands(wctx, 5*time.Second); close(watched) }()
-	// Commands are stopped, and their files removed, before Run returns.
-	defer func() { stopWatch(); <-watched }()
+	swept := make(chan struct{})
+	go func() { srv.WatchIssued(wctx, time.Minute); close(swept) }()
+	// Commands are stopped, and their files removed, and issued tokens are
+	// deleted, before Run returns.
+	defer func() { stopWatch(); <-watched; <-swept }()
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	go func() { errc <- hs.Serve(l) }()
 	log.Printf("secrets-broker listening on %s (sealed=%t)", l.Addr(), srv.Sealed())
