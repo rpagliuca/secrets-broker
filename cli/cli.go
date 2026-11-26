@@ -40,7 +40,7 @@ Commands sent to the control socket (-socket PATH):
   seal                   forget the vault key and every secret
   status                 report whether the broker is sealed
   pending [json]         list the requests waiting for approval
-  approve ID DURATION [NAME=CODE]...
+  approve ID DURATION [-only NAME,NAME] [NAME=CODE]...
                          grant a request, for example: approve 3f9a1c22 1h
                          (NAME=CODE: one-time code of a credential that needs one)
   deny ID                refuse a request

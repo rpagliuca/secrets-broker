@@ -196,6 +196,7 @@ the control socket:
 ```sh
 secrets-broker pending
 secrets-broker approve 3f9a1c22 1h
+secrets-broker approve 3f9a1c22 1h -only name-a,name-b   # part of it; the rest is refused
 secrets-broker deny 3f9a1c22
 secrets-broker grants
 secrets-broker revoke agent-1      # or: revoke all

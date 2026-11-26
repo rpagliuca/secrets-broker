@@ -387,6 +387,14 @@ func (g *Grants) Decide(id string, d time.Duration, by string) error {
 // without its codes, or with a code that does not work, is an error and
 // leaves the request waiting.
 func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[string]string) error {
+	return g.DecideSome(id, d, by, codes, nil)
+}
+
+// DecideSome is DecideWith for an approver who grants only part of what a
+// request asks: only names the credentials to grant, and the others are
+// refused, each with its cooldown. An empty only means the whole request.
+// A name that is not in the request is an error and leaves it waiting.
+func (g *Grants) DecideSome(id string, d time.Duration, by string, codes map[string]string, only []string) error {
 	if d < 0 || d > maxGrant {
 		return fmt.Errorf("duration must be between 0 and %s", maxGrant)
 	}
@@ -406,8 +414,17 @@ func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[str
 		if waiting == nil {
 			return fmt.Errorf("no waiting request %q (answered or expired)", id)
 		}
-		var missing []string
+		for _, c := range only {
+			if !slices.Contains(waiting.Credentials, c) {
+				return fmt.Errorf("%q is not in request %s", c, id)
+			}
+		}
+		var needs, missing []string
 		for _, c := range waiting.NeedsCode {
+			if len(only) > 0 && !slices.Contains(only, c) {
+				continue // left out: its code is not used
+			}
+			needs = append(needs, c)
 			if codes[c] == "" {
 				missing = append(missing, c)
 			}
@@ -415,7 +432,7 @@ func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[str
 		if len(missing) > 0 {
 			return fmt.Errorf("the request needs a one-time code for: %s (approve %s %s NAME=CODE)", strings.Join(missing, ", "), id, d)
 		}
-		for _, c := range waiting.NeedsCode {
+		for _, c := range needs {
 			until, err := g.unlock(waiting.Principal, c, codes[c], d)
 			if err != nil {
 				return err
@@ -432,11 +449,15 @@ func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[str
 		return fmt.Errorf("no waiting request %q (answered or expired)", id)
 	}
 	g.drop(req)
+	granted, refused := req.Request, req.Request
+	granted.Credentials, refused.Credentials = nil, nil
 	for _, c := range req.Credentials {
 		e := g.entries[grantKey{req.Principal.ID, c}]
-		if d == 0 {
+		if d == 0 || len(only) > 0 && d > 0 && !slices.Contains(only, c) {
 			e.blockedUntil = now.Add(g.cooldown)
+			refused.Credentials = append(refused.Credentials, c)
 		} else {
+			granted.Credentials = append(granted.Credentials, c)
 			e.until = now.Add(d)
 			if limit := limits[c]; !limit.IsZero() && limit.Before(e.until) {
 				e.until = limit
@@ -448,7 +469,8 @@ func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[str
 		g.record(req.Request, "refused", "by "+by)
 		return nil
 	}
-	g.record(req.Request, "granted", fmt.Sprintf("for %s, by %s", d, by))
+	g.record(granted, "granted", fmt.Sprintf("for %s, by %s", d, by))
+	g.record(refused, "refused", "left out of the grant, by "+by)
 	return nil
 }
 

@@ -570,6 +570,27 @@ func TestControlSocket(t *testing.T) {
 	if reply, err := ControlRequest(path, "grants", nil); err != nil || !strings.Contains(reply, "agent-a") {
 		t.Errorf("grants = %q, %v", reply, err)
 	}
+	// "-only" grants part of a request and refuses the rest.
+	q := Principal{ID: "agent-q"}
+	part, err := grants.Request(q, []string{"one", "two", "three"}, nil, 0, nil)
+	if err != nil || part == "" {
+		t.Fatalf("request of three: %q, %v", part, err)
+	}
+	if _, err := ControlRequest(path, "approve "+part+" 30m -only", nil); err == nil {
+		t.Error("-only without names accepted")
+	}
+	if _, err := ControlRequest(path, "approve "+part+" 30m -only one,nine", nil); err == nil {
+		t.Error("-only with a name that is not in the request accepted")
+	}
+	if reply, err := ControlRequest(path, "approve "+part+" 30m -only one,three", nil); err != nil || !strings.Contains(reply, "granted one,three for 30m0s") {
+		t.Errorf("approve -only = %q, %v", reply, err)
+	}
+	if !grants.Granted("agent-q", "one") || grants.Granted("agent-q", "two") || !grants.Granted("agent-q", "three") {
+		t.Error("want one and three granted, two refused")
+	}
+	if reply, err := ControlRequest(path, "revoke agent-q", nil); err != nil || reply != "ok: 2 grants revoked" {
+		t.Errorf("revoke = %q, %v", reply, err)
+	}
 	if reply, err := ControlRequest(path, "revoke all", nil); err != nil || reply != "ok: 1 grants revoked" {
 		t.Errorf("revoke = %q, %v", reply, err)
 	}

@@ -145,9 +145,18 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 		if err != nil || d <= 0 {
 			return "", errors.New("approve needs a positive duration, such as 1h")
 		}
+		// "-only NAME,NAME" grants part of the request and refuses the rest.
 		// NAME=CODE gives the one-time code of a credential that needs one.
+		rest := args[2:]
+		var only []string
+		if len(rest) > 0 && rest[0] == "-only" {
+			if len(rest) < 2 || rest[1] == "" {
+				return "", errors.New("-only takes the names to grant, separated by commas")
+			}
+			only, rest = strings.Split(rest[1], ","), rest[2:]
+		}
 		var codes map[string]string
-		for _, a := range args[2:] {
+		for _, a := range rest {
 			name, code, ok := strings.Cut(a, "=")
 			if !ok || name == "" || code == "" {
 				return "", errors.New("after the duration, approve takes one-time codes as NAME=CODE")
@@ -157,8 +166,11 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			}
 			codes[name] = code
 		}
-		if err := c.Grants.DecideWith(args[0], d, "control socket", codes); err != nil {
+		if err := c.Grants.DecideSome(args[0], d, "control socket", codes, only); err != nil {
 			return "", err
+		}
+		if len(only) > 0 {
+			return fmt.Sprintf("ok: granted %s for %s; the rest of the request was refused", strings.Join(only, ","), d), nil
 		}
 		return "ok: granted for " + d.String(), nil
 	case cmd == "deny" && len(args) == 1:
