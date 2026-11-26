@@ -339,7 +339,8 @@ one-time code with the answer, `secrets-broker approve 3f9a1c22 1h
 aws:audit=123456`. The broker opens the session with that code then and
 there, hands it to the client while the grant lasts and cannot renew it: the
 grant ends with the session (`max_duration`), and the client asks again.
-A wrong or used code leaves the request waiting.
+A wrong or used code leaves the request waiting, and the answer carries what
+STS said: it tells a wrong code from a wrong device serial.
 
 ## OAuth
 
