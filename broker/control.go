@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -115,6 +116,16 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			}
 		}
 		return out, nil
+	case cmd == "pending" && len(args) == 1 && args[0] == "json":
+		// Everything about the waiting requests, reasons included, for a
+		// program to read. The reasons are free text, which the line
+		// format above cannot carry.
+		reqs := c.Grants.Pending()
+		raw, err := json.Marshal(reqs)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("ok: %d waiting\n%s", len(reqs), raw), nil
 	case cmd == "grants" && len(args) == 0:
 		grants := c.Grants.Active()
 		out := fmt.Sprintf("ok: %d in force", len(grants))

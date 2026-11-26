@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Approver decides whether a client may use a credential right now.
@@ -47,6 +49,25 @@ type Request struct {
 	// Suggested is how long the client says it needs, or zero. It is a
 	// suggestion to the approver, who chooses.
 	Suggested time.Duration `json:"suggested,omitempty"`
+	// Reasons is why the client says it wants each credential, by name. It
+	// is the only text in a request written by the client: whatever shows
+	// it must mark it as the client's own, unverified words.
+	Reasons map[string]string `json:"reasons,omitempty"`
+}
+
+// maxReason is how long a reason may be, in characters.
+const maxReason = 200
+
+// cleanReason makes a reason safe to show on one line: no control
+// characters, single spaces, at most maxReason characters.
+func cleanReason(s string) string {
+	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " ")
+	if r := []rune(s); len(r) > maxReason {
+		s = string(r[:maxReason])
+	}
+	return s
 }
 
 // Grant is an approved request.
@@ -215,16 +236,24 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 	case len(g.pending) >= maxPending:
 		return &ApprovalError{}
 	}
-	return &ApprovalError{RequestID: g.ask(now, p, []string{credential}, hosts, 0)}
+	return &ApprovalError{RequestID: g.ask(now, p, []string{credential}, hosts, 0, nil)}
 }
 
 // ask creates one waiting request for credentials and notifies the
 // approver. The caller holds the lock and has checked each credential.
-func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, suggested time.Duration) string {
+func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) string {
 	raw := make([]byte, 4)
 	rand.Read(raw)
 	req := Request{ID: hex.EncodeToString(raw), Principal: p, Credential: credentials[0], Credentials: credentials,
 		Hosts: hosts, Created: now.UTC(), Suggested: suggested}
+	for _, c := range credentials {
+		if why := cleanReason(reasons[c]); why != "" {
+			if req.Reasons == nil {
+				req.Reasons = map[string]string{}
+			}
+			req.Reasons[c] = why
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), g.ttl)
 	g.pending[req.ID] = &pendingRequest{Request: req, expires: now.Add(g.ttl), cancel: cancel}
 	for _, c := range credentials {
@@ -245,7 +274,7 @@ func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, su
 // with the duration the client suggests. Credentials already granted, or
 // already waiting in another request, are left out. It returns the id of
 // the request that was created, or "" when there was nothing left to ask.
-func (g *Grants) Request(p Principal, credentials, hosts []string, suggested time.Duration) (string, error) {
+func (g *Grants) Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
@@ -276,7 +305,7 @@ func (g *Grants) Request(p Principal, credentials, hosts []string, suggested tim
 	case len(g.pending) >= maxPending:
 		return "", &ApprovalError{}
 	}
-	return g.ask(now, p, ask, hosts, suggested), nil
+	return g.ask(now, p, ask, hosts, suggested, reasons), nil
 }
 
 // Granted implements Approver.

@@ -150,12 +150,12 @@ func (s *services) Until(principal, credential string) time.Time {
 }
 
 // Request asks ahead for several credentials. A service cannot ask.
-func (s *services) Request(p Principal, credentials, hosts []string, suggested time.Duration) (string, error) {
+func (s *services) Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error) {
 	if s.byID(p.ID) != nil {
 		return "", errors.New("a service cannot ask for approval: its credentials are fixed in the configuration")
 	}
 	r, ok := s.inner.(interface {
-		Request(p Principal, credentials, hosts []string, suggested time.Duration) (string, error)
+		Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error)
 	})
 	if !ok {
 		return "", errors.New("approval is not configured: there is nothing to ask for")
@@ -165,5 +165,5 @@ func (s *services) Request(p Principal, credentials, hosts []string, suggested t
 	if len(credentials) == 0 {
 		return "", nil
 	}
-	return r.Request(p, credentials, hosts, suggested)
+	return r.Request(p, credentials, hosts, suggested, reasons)
 }

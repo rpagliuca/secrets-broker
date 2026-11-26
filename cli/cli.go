@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,14 +32,14 @@ const usage = `usage: secrets-broker <command> [flags]
   token                              print a new client token and its SHA-256
   aws-credentials ACCOUNT            print temporary AWS credentials (for credential_process)
   access                             list what this client may ask for and what it holds
-  request [-for 4h] NAME...          ask ahead, in one question, for what a task needs
+  request [-for 4h] NAME[=WHY]...    ask ahead, in one question, for what a task needs
 
 Commands sent to the control socket (-socket PATH):
 
   unseal                 read the vault key from standard input and unseal
   seal                   forget the vault key and every secret
   status                 report whether the broker is sealed
-  pending                list the requests waiting for approval
+  pending [json]         list the requests waiting for approval
   approve ID DURATION    grant a request, for example: approve 3f9a1c22 1h
   deny ID                refuse a request
   grants                 list the grants in force
@@ -121,18 +121,30 @@ func Main(customize Customize) {
 		method, path, body := http.MethodGet, "/grants", ""
 		if cmd == "request" {
 			if fs.NArg() == 0 {
-				log.Fatal("usage: secrets-broker request [-for 4h] NAME...")
+				log.Fatal(`usage: secrets-broker request [-for 4h] NAME[=WHY]...   (WHY: why you want it, 200 characters at most)`)
 			}
-			quoted := make([]string, fs.NArg())
-			for i, n := range fs.Args() {
-				quoted[i] = strconv.Quote(n)
+			// NAME=WHY gives the reason for that credential, shown to the
+			// approver as the client's own words.
+			payload := struct {
+				Credentials []string          `json:"credentials"`
+				Duration    string            `json:"duration,omitempty"`
+				Reasons     map[string]string `json:"reasons,omitempty"`
+			}{Duration: *d}
+			for _, a := range fs.Args() {
+				name, why, has := strings.Cut(a, "=")
+				payload.Credentials = append(payload.Credentials, name)
+				if has {
+					if payload.Reasons == nil {
+						payload.Reasons = map[string]string{}
+					}
+					payload.Reasons[name] = why
+				}
 			}
-			method, path = http.MethodPost, "/requests"
-			body = `{"credentials":[` + strings.Join(quoted, ",") + `]`
-			if *d != "" {
-				body += `,"duration":` + strconv.Quote(*d)
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				log.Fatalf("secrets-broker: %v", err)
 			}
-			body += "}"
+			method, path, body = http.MethodPost, "/requests", string(raw)
 		}
 		req, err := http.NewRequest(method, *addr+path, strings.NewReader(body))
 		if err != nil {

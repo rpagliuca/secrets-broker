@@ -172,8 +172,10 @@ time.
 1. The first request of a client for a credential is refused with `403` and
    creates a waiting request. The client retries later.
 2. The approver sees the client id and name (from the authenticator), the
-   credential and its hosts (from the configuration). Nothing in the request
-   is text written by the client.
+   credential and its hosts (from the configuration). The client may add
+   a reason of at most 200 characters for each credential: that is the only
+   text of its own in the request, kept apart so that it is never shown as
+   the broker's word.
 3. The approver grants it for one of the durations, or refuses it. A grant
    covers that client and that credential only, and is checked on every
    request, so it also ends inside an open tunnel.
@@ -384,7 +386,10 @@ both commands take `-token-env NAME`.) The approver gets one question with
 every name and the suggested duration, which becomes the first button; one
 answer grants or refuses them all. Names are `credential`, `ssh:<target>`,
 `aws:<account>` and `command:<name>`. The client names things and suggests a
-duration; it cannot add text of its own to the question.
+duration. It may also say why it wants each name, as `NAME=WHY` (200
+characters at most). That reason is the client's own, unverified text: it
+is kept apart in the request (`secrets-broker pending json` shows it) and
+the reference notifier leaves it out of the question.
 
 By default the first use of a credential without a grant creates the
 request. With `"explicit_only": true` in `approval`, a use without a grant is

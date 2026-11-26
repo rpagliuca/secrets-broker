@@ -59,11 +59,14 @@ func (c *Config) known(name string) bool {
 // access serves the two calls a client uses to plan its work:
 //
 //	GET  /grants    what it may ask for and what it holds now
-//	POST /requests  {"credentials": ["a", "ssh:b"], "duration": "4h"}
+//	POST /requests  {"credentials": ["a", "ssh:b"], "duration": "4h", "reasons": {"a": "why"}}
 //
 // A request made ahead covers everything a task needs in one question to
 // the approver, instead of one question at each first use. The client names
-// credentials and suggests a duration; it cannot add text of its own.
+// credentials and suggests a duration. It may say why it wants each one, in
+// at most 200 characters: the only text of its own in the request, kept
+// apart in Request.Reasons so that nothing shows it as if it were the
+// broker's word.
 func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 	ev := Event{Time: time.Now().UTC(), Method: "request"}
 	deny := func(code int, reason string) {
@@ -85,7 +88,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 	cfg, _ := s.state()
 	catalog := cfg.catalog(p.Groups)
 	asker, _ := s.Approver.(interface {
-		Request(p Principal, credentials, hosts []string, suggested time.Duration) (string, error)
+		Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error)
 		Until(principal, credential string) time.Time
 	})
 	if asker == nil {
@@ -116,8 +119,9 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"available": names, "grants": held(names)})
 	case r.Method == http.MethodPost && r.URL.Path == "/requests":
 		var in struct {
-			Credentials []string `json:"credentials"`
-			Duration    Duration `json:"duration"`
+			Credentials []string          `json:"credentials"`
+			Duration    Duration          `json:"duration"`
+			Reasons     map[string]string `json:"reasons"`
 		}
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in) != nil || len(in.Credentials) == 0 {
 			deny(http.StatusBadRequest, `send {"credentials": ["name", ...], "duration": "4h"}`)
@@ -132,7 +136,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 			}
 			hosts = append(hosts, h...)
 		}
-		id, err := asker.Request(p, in.Credentials, hosts, time.Duration(in.Duration))
+		id, err := asker.Request(p, in.Credentials, hosts, time.Duration(in.Duration), in.Reasons)
 		var ae *ApprovalError
 		if err != nil && !errors.As(err, &ae) {
 			deny(http.StatusBadRequest, err.Error())
