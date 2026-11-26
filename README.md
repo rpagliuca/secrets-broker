@@ -134,6 +134,7 @@ Unknown fields are rejected.
 | `credentials[].groups` | Client groups allowed to use the credential |
 | `credentials[].scheme` | `bearer`, `basic` with `username`, `oauth2` with `token_url`, or `github_app` with `github_app` |
 | `credentials[].methods` | Optional list of allowed HTTP methods |
+| `credentials[].upstream` | Optional. Where the requests really go, as `http://host:port` or `https://host:port`, instead of `https://<host>`: a service on another port, or without TLS on a private network that is already encrypted. The client still talks HTTPS to the broker under the single name in `hosts`. With `http://` the credential crosses that network in clear text |
 | `credentials[].token_url` | For scheme `oauth2` (see "OAuth") |
 | `credentials[].github_app` | For scheme `github_app` (see "GitHub App") |
 | `credentials[].default` | The one used when several credentials serve a host and the client names none |

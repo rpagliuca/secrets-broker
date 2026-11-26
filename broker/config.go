@@ -72,6 +72,14 @@ type Credential struct {
 	// TokenURL is the OAuth token endpoint, for scheme oauth2. The secret
 	// must be bound to its host too.
 	TokenURL string `json:"token_url,omitempty"`
+	// Upstream, when set, is where the requests really go, as
+	// "http://host:port" or "https://host:port", instead of "https://<the
+	// host the client named>". It serves a service that listens on another
+	// port, or without TLS on a private network that is already encrypted
+	// (a VPN): the client still talks HTTPS to the broker under the name in
+	// Hosts, and the secret stays bound to that name. With "http://" the
+	// credential crosses that network in clear text.
+	Upstream string `json:"upstream,omitempty"`
 	// Methods, when set, restricts the HTTP methods (for example GET and
 	// HEAD for a read-only credential).
 	Methods []string `json:"methods,omitempty"`
@@ -193,6 +201,16 @@ func (c *Config) Validate() error {
 		names[cr.Name] = true
 		if cr.Secret != "" && !nameRE.MatchString(cr.Secret) {
 			return fmt.Errorf("credential %q: invalid secret name %q", cr.Name, cr.Secret)
+		}
+		if cr.Upstream != "" {
+			u, err := url.Parse(cr.Upstream)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+				strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+				return fmt.Errorf("credential %q: upstream must be http://host[:port] or https://host[:port], and nothing else", cr.Name)
+			}
+			if len(cr.Hosts) != 1 {
+				return fmt.Errorf("credential %q: with upstream, hosts must name exactly one host", cr.Name)
+			}
 		}
 		switch cr.Scheme {
 		case "bearer":
