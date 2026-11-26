@@ -207,3 +207,25 @@ func TestApprovalConfig(t *testing.T) {
 		t.Error("a bare number was accepted as a duration")
 	}
 }
+
+// The log of an approval says who the principal was, not only its id.
+func TestApprovalEventsCarryTheName(t *testing.T) {
+	g, _, _, audit := newTestGrants()
+	p := Principal{ID: "agent-a", Name: "fix the build", Groups: []string{"team-a"}}
+	id := requestID(t, g.Authorize(p, "svc", []string{goodHost}))
+	if err := g.Decide(id, time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	seen := map[string]bool{}
+	for _, ev := range audit.events {
+		if ev.Name != "fix the build" {
+			t.Errorf("%s event has name %q", ev.Decision, ev.Name)
+		}
+		seen[ev.Decision] = true
+	}
+	if !seen["requested"] || !seen["granted"] {
+		t.Fatalf("events = %+v", audit.events)
+	}
+}
