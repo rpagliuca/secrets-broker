@@ -45,8 +45,10 @@ type Config struct {
 
 	// Commands are programs the broker runs for clients, with secrets
 	// written to CommandsDir while they run.
-	Commands    []Command `json:"commands,omitempty"`
-	CommandsDir string    `json:"commands_dir,omitempty"`
+	Commands []Command `json:"commands,omitempty"`
+	// Databases run SQL a client wrote, once per approval (see Database).
+	Databases   []Database `json:"databases,omitempty"`
+	CommandsDir string     `json:"commands_dir,omitempty"`
 
 	// SSH, when set, starts the SSH proxy.
 	SSH *SSH `json:"ssh,omitempty"`
@@ -186,6 +188,14 @@ func (c *Config) Validate() error {
 			if _, ok := c.Commands[i].Forwards[t.Address]; !ok {
 				return fmt.Errorf("ssh target %q: command %q does not forward to %s", t.Name, t.Via, t.Address)
 			}
+		}
+	}
+	for i := range c.Databases {
+		if err := c.Databases[i].validate(c); err != nil {
+			return err
+		}
+		if c.Approval == nil {
+			return fmt.Errorf("database %q: needs approval, where the query is read", c.Databases[i].Name)
 		}
 	}
 	if err := c.grantNamesAreUnique(); err != nil {
@@ -452,6 +462,11 @@ func (c *Config) grantNamesAreUnique() error {
 	}
 	for i := range c.Commands {
 		if err := add(c.Commands[i].grantName()); err != nil {
+			return err
+		}
+	}
+	for i := range c.Databases {
+		if err := add(c.Databases[i].grantName()); err != nil {
 			return err
 		}
 	}

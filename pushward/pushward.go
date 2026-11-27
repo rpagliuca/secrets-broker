@@ -351,6 +351,11 @@ func (n *Notifier) text(req broker.Request) (string, string) {
 	if len(req.NeedsCode) > 0 {
 		what += "; needs a one-time code, so approve it on the broker"
 	}
+	if len(req.Queries) > 0 {
+		// The SQL is never in the notification: it can be long, and it
+		// is read in full where it is approved.
+		what += "; the query to review is on the broker"
+	}
 	return "Credential request", fmt.Sprintf("%s asks for %s (%s)", who, what, req.Principal.ID)
 }
 

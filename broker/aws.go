@@ -219,6 +219,11 @@ var oneTimeCodeRE = regexp.MustCompile(`^[0-9]{6,8}$`)
 // only be granted with a one-time code: an AWS account with an MFA device.
 func (s *Server) needsCode(credential string) bool {
 	cfg, _ := s.state()
+	if db := cfg.database(credential); db != nil {
+		// The query runs with a session of its AWS account, opened with
+		// the code typed at the approval.
+		return true
+	}
 	for i := range cfg.AWS {
 		if cfg.AWS[i].grantName() == credential {
 			return cfg.AWS[i].MFASerial != ""
@@ -236,6 +241,15 @@ func (s *Server) unlockWithCode(p Principal, credential, code string, d time.Dur
 	for i := range cfg.AWS {
 		if cfg.AWS[i].grantName() == credential {
 			acct = cfg.awsAccount(cfg.AWS[i].Name, p.Groups)
+		}
+	}
+	if db := cfg.database(credential); db != nil {
+		// The account's own groups do not matter here: the database's
+		// groups were checked when the client asked.
+		for i := range cfg.AWS {
+			if cfg.AWS[i].Name == db.AWS {
+				acct = &cfg.AWS[i]
+			}
 		}
 	}
 	if acct == nil || acct.MFASerial == "" {
