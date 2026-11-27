@@ -58,15 +58,26 @@ func awsHarness(t *testing.T) (*harness, *[]url.Values) {
 		// The signature must be the one this key gives for this exact request.
 		signed := r.Header.Get("Authorization")
 		at, _ := time.Parse("20060102T150405Z", r.Header.Get("X-Amz-Date"))
+		// A call made with a session the fake issued is signed with it.
+		keyID, secretKey, token := awsKeyID, awsSecretKey, r.Header.Get("X-Amz-Security-Token")
+		if token != "" {
+			if token != "temp-token" {
+				return answer(403, "<Error><Code>InvalidClientTokenId</Code></Error>"), nil
+			}
+			keyID, secretKey = "ASIATEMP", "temp-secret"
+		}
 		check := r.Clone(r.Context())
-		signV4(check, string(body), awsKeyID, awsSecretKey, "us-east-1", "sts", at)
-		if signed != check.Header.Get("Authorization") || !strings.HasPrefix(signed, "AWS4-HMAC-SHA256 Credential="+awsKeyID+"/") {
+		signV4(check, string(body), keyID, secretKey, token, "us-east-1", "sts", at)
+		if signed != check.Header.Get("Authorization") || !strings.HasPrefix(signed, "AWS4-HMAC-SHA256 Credential="+keyID+"/") {
 			return answer(403, "<Error><Code>SignatureDoesNotMatch</Code></Error>"), nil
 		}
 		if strings.Contains(string(body)+signed, awsSecretKey) {
 			t.Error("the long-term key was sent to STS")
 		}
 		mu.Lock()
+		if token != "" {
+			form.Set("X-Amz-Security-Token", token)
+		}
 		calls = append(calls, form)
 		mu.Unlock()
 		secs, _ := strconv.Atoi(form.Get("DurationSeconds"))
@@ -685,13 +696,22 @@ func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
 	if out, err := c.run([]string{"approve", req.ID, "4h", "aws:audit=123456"}, nil); err != nil {
 		t.Fatalf("%s %v", out, err)
 	}
-	if len(*calls) != 1 {
+	// First a session of the user, opened with the code; then the role,
+	// assumed with that session, so that a policy on the user that denies
+	// what is done without MFA lets it through.
+	if len(*calls) != 2 {
 		t.Fatalf("%d STS calls", len(*calls))
 	}
 	form := (*calls)[0]
-	if form.Get("Action") != "AssumeRole" || form.Get("SerialNumber") != "arn:aws:iam::123456789012:mfa/key-1" ||
-		form.Get("TokenCode") != "123456" || form.Get("DurationSeconds") != "3600" {
-		t.Fatalf("STS call = %v", form)
+	if form.Get("Action") != "GetSessionToken" || form.Get("SerialNumber") != "arn:aws:iam::123456789012:mfa/key-1" ||
+		form.Get("TokenCode") != "123456" || form.Get("DurationSeconds") != "3600" || form.Get("X-Amz-Security-Token") != "" {
+		t.Fatalf("first STS call = %v", form)
+	}
+	form = (*calls)[1]
+	if form.Get("Action") != "AssumeRole" || form.Get("RoleArn") != "arn:aws:iam::123456789012:role/read-only" ||
+		form.Get("SerialNumber") != "" || form.Get("TokenCode") != "" || form.Get("DurationSeconds") != "3600" ||
+		form.Get("X-Amz-Security-Token") != "temp-token" {
+		t.Fatalf("second STS call = %v", form)
 	}
 	// The grant asked for was 4 h; it ends with the session, in 1 h.
 	grants := g.Active()
@@ -705,7 +725,7 @@ func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
 			t.Fatalf("%d %s", code, body)
 		}
 	}
-	if len(*calls) != 1 {
+	if len(*calls) != 2 {
 		t.Fatalf("%d STS calls after two uses", len(*calls))
 	}
 	// When the session is gone the broker cannot open another on its own.
@@ -713,7 +733,7 @@ func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
 	if code, body := h.aws("audit", "token-a"); code != 403 || !strings.Contains(body, "ask again") {
 		t.Fatalf("after the session: %d %s", code, body)
 	}
-	if len(*calls) != 1 {
+	if len(*calls) != 2 {
 		t.Fatalf("%d STS calls", len(*calls))
 	}
 }

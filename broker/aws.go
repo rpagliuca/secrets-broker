@@ -286,27 +286,46 @@ var (
 // stsSession asks STS for temporary credentials, signing with the long-term
 // key. code is the one-time code of the MFA device of the account, when it
 // has one. Only the error code of a refusal is kept.
+//
+// A role with an MFA device is reached in two steps: GetSessionToken with the
+// code, then AssumeRole signed with that session. Calling AssumeRole with the
+// key and the code would satisfy the trust policy of the role, but not a
+// policy on the user that denies what is done without MFA: the MFA of the
+// call is not in the context the user's own policies see.
 func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID, secretKey string, d time.Duration, client, code string, now time.Time) (awsCredentials, error) {
-	form := url.Values{"Version": {"2011-06-15"}, "DurationSeconds": {strconv.Itoa(int(d.Seconds()))}}
+	form := url.Values{"Version": {"2011-06-15"}, "DurationSeconds": {strconv.Itoa(int(d.Seconds()))}, "Action": {"GetSessionToken"}}
 	if a.MFASerial != "" {
 		form.Set("SerialNumber", a.MFASerial)
 		form.Set("TokenCode", code)
+	}
+	token := ""
+	if a.RoleARN != "" && a.MFASerial != "" {
+		user, err := stsCall(ctx, rt, a, form, keyID, secretKey, "", now)
+		if err != nil {
+			return awsCredentials{}, err
+		}
+		keyID, secretKey, token = user.AccessKeyID, user.SecretAccessKey, user.SessionToken
+		form = url.Values{"Version": {"2011-06-15"}, "DurationSeconds": form["DurationSeconds"]}
 	}
 	if a.RoleARN != "" {
 		name := awsSessionNameRE.ReplaceAllString(client, "-")
 		form.Set("Action", "AssumeRole")
 		form.Set("RoleArn", a.RoleARN)
 		form.Set("RoleSessionName", (name + "--")[:min(len(name)+2, 64)])
-	} else {
-		form.Set("Action", "GetSessionToken")
 	}
+	return stsCall(ctx, rt, a, form, keyID, secretKey, token, now)
+}
+
+// stsCall sends one STS request. token is the session token of temporary
+// credentials, or "" for a long-term key.
+func stsCall(ctx context.Context, rt http.RoundTripper, a *AWSAccount, form url.Values, keyID, secretKey, token string, now time.Time) (awsCredentials, error) {
 	body := form.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+a.stsHost()+"/", strings.NewReader(body))
 	if err != nil {
 		return awsCredentials{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-	signV4(req, body, keyID, secretKey, a.region(), "sts", now)
+	signV4(req, body, keyID, secretKey, token, a.region(), "sts", now)
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		return awsCredentials{}, err
@@ -340,11 +359,15 @@ func stsSession(ctx context.Context, rt http.RoundTripper, a *AWSAccount, keyID,
 }
 
 // signV4 adds an AWS Signature Version 4 to a request with a known body.
-// Signed headers: content-type, host and x-amz-date.
-func signV4(req *http.Request, body, keyID, secretKey, region, service string, now time.Time) {
+// Signed headers: content-type, host and x-amz-date, and
+// x-amz-security-token when token (of temporary credentials) is not "".
+func signV4(req *http.Request, body, keyID, secretKey, token, region, service string, now time.Time) {
 	amzDate := now.UTC().Format("20060102T150405Z")
 	date := amzDate[:8]
 	req.Header.Set("X-Amz-Date", amzDate)
+	if token != "" {
+		req.Header.Set("X-Amz-Security-Token", token)
+	}
 	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 	mac := func(key []byte, s string) []byte {
 		m := hmac.New(sha256.New, key)
@@ -356,14 +379,17 @@ func signV4(req *http.Request, body, keyID, secretKey, region, service string, n
 	if uri == "" {
 		uri = "/"
 	}
-	const signed = "content-type;host;x-amz-date"
-	canonical := strings.Join([]string{
-		req.Method, uri, req.URL.RawQuery,
+	signed := "content-type;host;x-amz-date"
+	headers := []string{
 		"content-type:" + req.Header.Get("Content-Type"),
 		"host:" + req.URL.Host,
 		"x-amz-date:" + amzDate,
-		"", signed, sum(body),
-	}, "\n")
+	}
+	if token != "" {
+		signed += ";x-amz-security-token"
+		headers = append(headers, "x-amz-security-token:"+token)
+	}
+	canonical := strings.Join(append(append([]string{req.Method, uri, req.URL.RawQuery}, headers...), "", signed, sum(body)), "\n")
 	scope := date + "/" + region + "/" + service + "/aws4_request"
 	toSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sum(canonical)
 	key := mac(mac(mac(mac([]byte("AWS4"+secretKey), date), region), service), "aws4_request")

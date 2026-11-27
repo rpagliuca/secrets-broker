@@ -331,6 +331,10 @@ region (`sts.us-east-1.amazonaws.com`). `GET /aws/prod` with
 `Authorization: Bearer <token>` answers in the `credential_process` format,
 after the same checks as a credential (group, grant named `aws:prod`). With
 `role_arn` the broker calls `AssumeRole`; without it, `GetSessionToken`.
+With both `role_arn` and `mfa_serial` it opens a session of the user with the
+one-time code (`GetSessionToken`) and assumes the role with that session, so
+that a policy on the user denying what is done without MFA
+(`aws:MultiFactorAuthPresent`) does not block the `AssumeRole`.
 
 ```ini
 [profile prod]
