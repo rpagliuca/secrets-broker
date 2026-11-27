@@ -1,0 +1,18 @@
+# One VPN container shared by the commands of each device (device.sh). No
+# "ports": the devices are reached only through the broker's SSH proxy.
+services:
+  vpn:
+    build: .
+    container_name: secrets-broker-shared-vpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    volumes:
+      - ${VPN_DIR:?}:/vpn
+    environment:
+      - BRIDGES=plc1.sock:192.168.1.10:502 meter.sock:192.168.1.20:7701 host.sock:192.168.1.30:22
+    restart: "no"
+    # The log stays in the journal after the container is gone.
+    logging:
+      driver: journald
+      options:
+        tag: secrets-broker-shared-vpn

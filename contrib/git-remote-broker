@@ -1,0 +1,33 @@
+#!/bin/sh
+# git transport for GitHub through the broker. git runs it for
+# "broker::https://github.com/OWNER/REPO" URLs (set every GitHub remote to it
+# with url."broker::https://github.com/".insteadOf). With a client token, git
+# goes over HTTPS through the broker's proxy with the repository's name at the
+# highest level granted; the broker puts a token that reaches that repository
+# only. Without a grant nothing leaves. Without a client token, it is plain git.
+. "$(dirname "$0")/sb-common.sh"
+url=${2#broker::}
+case "$url" in
+https://github.com/*) ;;
+*)
+	echo "git-remote-broker: only https://github.com/, not $url" >&2
+	exit 128
+	;;
+esac
+[ -n "$SB_TOKEN" ] || exec git remote-https "$1" "$url"
+path=${url#https://github.com/}
+owner=${path%%/*}
+rest=${path#*/}
+repo=${rest%%/*}
+repo=${repo%.git}
+name=$("$(dirname "$0")/secrets-broker-github-name" "$owner/$repo")
+if [ -z "$name" ]; then
+	echo "git: no grant from the broker for $owner/$repo. Ask first, saying why: secrets-broker wait -for 15m '<name of $owner/$repo>=<what you will do>'" >&2
+	exit 128
+fi
+# The name goes as the proxy user, with "/" written %2F.
+user=$(printf '%s' "$name" | sed 's,/,%2F,g')
+export https_proxy="http://$user:$SB_TOKEN@$SB_PROXY" HTTPS_PROXY="http://$user:$SB_TOKEN@$SB_PROXY"
+export GIT_SSL_CAINFO="$SB_RUNTIME/ca.pem" GIT_TERMINAL_PROMPT=0
+# The broker sets the Authorization of every request: no credential helper.
+exec git -c credential.helper= remote-https "$1" "$url"
