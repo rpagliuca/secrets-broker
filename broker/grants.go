@@ -336,21 +336,26 @@ func (g *Grants) Request(p Principal, credentials, hosts []string, suggested tim
 	if suggested < 0 || suggested > maxGrant {
 		suggested = 0
 	}
-	var ask []string
+	var ask, said []string
 	var blocked time.Time
 	for _, c := range credentials {
 		e := g.entries[grantKey{p.ID, c}]
 		switch {
 		case slices.Contains(ask, c) || e != nil && (now.Before(e.until) || e.pending != ""):
 		case e != nil && now.Before(e.blockedUntil):
-			blocked = e.blockedUntil
+			if e.blockedUntil.After(blocked) {
+				blocked = e.blockedUntil
+			}
+			if e.refusal != "" && !slices.Contains(said, e.refusal) {
+				said = append(said, e.refusal)
+			}
 		default:
 			ask = append(ask, c)
 		}
 	}
 	switch {
 	case len(ask) == 0 && !blocked.IsZero():
-		return "", &ApprovalError{Until: blocked}
+		return "", &ApprovalError{Until: blocked, Refusal: strings.Join(said, " / ")}
 	case len(ask) == 0:
 		return "", nil
 	case len(g.pending) >= maxPending:

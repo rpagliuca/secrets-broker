@@ -443,6 +443,28 @@ func TestRefusalCarriesWhatTheApproverSaid(t *testing.T) {
 	}
 }
 
+// A client that waits by asking again (POST /requests) gets the text too,
+// not only the one that tries to use the credential.
+func TestRequestAgainCarriesTheRefusal(t *testing.T) {
+	g, _, _, _ := newTestGrants()
+	a := Principal{ID: "agent-a"}
+	id, err := g.Request(a, []string{"one", "two"}, nil, 0, nil)
+	if err != nil || id == "" {
+		t.Fatalf("request: %q %v", id, err)
+	}
+	if err := g.DecideWhy(id, 0, "test", nil, nil, "too broad"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = g.Request(a, []string{"one", "two"}, nil, 0, nil)
+	var ae *ApprovalError
+	if !errors.As(err, &ae) || ae.Refusal != "too broad" || ae.Until.IsZero() {
+		t.Fatalf("asking again: %#v", err)
+	}
+	if !strings.Contains(err.Error(), `(the approver said: "too broad"); a new request`) {
+		t.Fatalf("message %q", err.Error())
+	}
+}
+
 func TestPartialGrantTellsTheRefusedWhy(t *testing.T) {
 	g, _, _, _ := newTestGrants()
 	a := Principal{ID: "agent-a"}
