@@ -727,6 +727,26 @@ profile or a replaced binary in that account would see the key.
   contains the client id, credential name, host, method, path and status,
   never a secret or a token.
 
+## Client commands and helpers
+
+For clients (agents), besides `request` and `access`:
+
+- `secrets-broker wait [-for 4h] NAME[=WHY]...` asks and waits for the answer,
+  asking again every few seconds (which does not notify the approver again).
+  It prints `granted: …`, or `partly granted: …; refused: … (ask again after
+  HH:MM, …; the approver said: …)`, and exits 0 when everything was granted,
+  2 when something was refused, 3 after 24 hours without an answer.
+- `secrets-broker sql NAME TIMEOUT WHY < QUERY` asks for one query on a
+  database (see "SQL"), waits, runs it once and prints tab-separated rows.
+- `secrets-broker encrypt -name NAME -recipient vault.pub -config config.json`
+  writes `NAME.age` for the store, bound to the hosts of the names that use
+  the secret; `-rotation FILE -new [-expires 90d]` records the rotation the
+  panel shows.
+
+`contrib/` has shell helpers (SSH to a target, git and `gh` through the
+broker by repository, an askpass) configured by one `client.env`, and
+`examples/shared-vpn/` one VPN behind a grant per device.
+
 ## Phone panel
 
 `cmd/secrets-broker-web` (package `web`) is a small web panel for the

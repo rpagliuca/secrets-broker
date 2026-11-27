@@ -348,13 +348,55 @@ func checkVaultKey(key []byte, publicKeyFile string) error {
 // than the vault.
 type Rotation struct {
 	Vault struct {
-		Public    string    `json:"publica"`
-		RotatedAt time.Time `json:"rotacionada_em"`
-	} `json:"cofre"`
-	Secrets map[string]*time.Time `json:"segredos"`
+		Public    string    `json:"public"`
+		RotatedAt time.Time `json:"rotated_at"`
+	} `json:"vault"`
+	Secrets map[string]*time.Time `json:"secrets"`
 	// Expiries says until when the value of each secret that has one is
 	// valid at its service.
-	Expiries map[string]time.Time `json:"vencimentos"`
+	Expiries map[string]time.Time `json:"expiries"`
+}
+
+// UnmarshalJSON also reads the key names of earlier files.
+func (r *Rotation) UnmarshalJSON(b []byte) error {
+	type vault struct {
+		Public       string    `json:"public"`
+		RotatedAt    time.Time `json:"rotated_at"`
+		OldPublic    string    `json:"publica"`
+		OldRotatedAt time.Time `json:"rotacionada_em"`
+	}
+	var v struct {
+		Vault       *vault                `json:"vault"`
+		OldVault    *vault                `json:"cofre"`
+		Secrets     map[string]*time.Time `json:"secrets"`
+		OldSecrets  map[string]*time.Time `json:"segredos"`
+		Expiries    map[string]time.Time  `json:"expiries"`
+		OldExpiries map[string]time.Time  `json:"vencimentos"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	vt := v.Vault
+	if vt == nil {
+		vt = v.OldVault
+	}
+	if vt != nil {
+		r.Vault.Public, r.Vault.RotatedAt = vt.Public, vt.RotatedAt
+		if r.Vault.Public == "" {
+			r.Vault.Public = vt.OldPublic
+		}
+		if r.Vault.RotatedAt.IsZero() {
+			r.Vault.RotatedAt = vt.OldRotatedAt
+		}
+	}
+	r.Secrets, r.Expiries = v.Secrets, v.Expiries
+	if r.Secrets == nil {
+		r.Secrets = v.OldSecrets
+	}
+	if r.Expiries == nil {
+		r.Expiries = v.OldExpiries
+	}
+	return nil
 }
 
 // renewAt is the share of the validity after which the panel asks for a

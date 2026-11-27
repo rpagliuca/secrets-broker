@@ -1,0 +1,54 @@
+#!/bin/sh
+# gh through the broker. Put it before the real gh, renamed gh.real. With a
+# client token, the GitHub API goes through the broker's proxy, which puts the
+# real token; gh only gets a placeholder. The name is the repository's (from
+# -R/--repo or the origin remote), at the highest level granted; a call with
+# no repository uses SB_GITHUB_ALL_REPOS when it is granted.
+#
+# Without a grant gh does NOT ask: tools run gh on their own (the status of
+# the branch's pull request), and each run would become a question to the
+# approver. It fails at once (exit 4) with how to ask, without running gh.
+. "$(dirname "$0")/sb-common.sh"
+REAL="$(dirname "$0")/gh.real"
+if [ -n "$SB_TOKEN" ]; then
+	repo=
+	prev=
+	for a in "$@"; do
+		case "$prev" in -R | --repo) repo=$a ;; esac
+		case "$a" in --repo=*) repo=${a#--repo=} ;; esac
+		prev=$a
+	done
+	if [ -z "$repo" ]; then
+		origin=$(git remote get-url origin 2>/dev/null)
+		case "$origin" in
+		*github.com[:/]*) repo=$(printf '%s' "$origin" | sed -E 's,^.*github\.com[:/],,; s,\.git$,,; s,/$,,') ;;
+		esac
+	fi
+	repo=${repo#github.com/}
+	name=
+	[ -n "$repo" ] && name=$("$(dirname "$0")/secrets-broker-github-name" "$repo")
+	if [ -z "$name" ] && [ -n "${SB_GITHUB_ALL_REPOS:-}" ] &&
+		env "$SB_TOKEN_VAR=$SB_TOKEN" "$SB_BIN" access -token-env "$SB_TOKEN_VAR" 2>/dev/null | grep -q "\"credential\":\"$SB_GITHUB_ALL_REPOS\""; then
+		name=$SB_GITHUB_ALL_REPOS
+	fi
+	if [ -z "$name" ]; then
+		owner=$(printf '%s' "${repo%%/*}" | tr 'A-Z' 'a-z')
+		r=$(printf '%s' "${repo#*/}" | tr 'A-Z' 'a-z')
+		suggest="<name of ${repo:-the repository}>"
+		for m in ${SB_GITHUB_OWNERS:-}; do
+			[ "${m%%=*}" = "$owner" ] && suggest="${m#*=}/$r/$(printf '%s' "$SB_GITHUB_LEVELS" | awk '{print $NF}')"
+		done
+		cat >&2 <<EOF
+gh: no grant from the broker for ${repo:-this command}; gh did not run.
+The GitHub token stays in the broker and is used only after the approver grants it, for a while. Using it without a grant tells no one: ask first, saying why, and wait in the background:
+  secrets-broker wait -for 15m '$suggest=<what you will do>'
+A refusal keeps the same name from being asked again for a while; the answer says until when.
+EOF
+		exit 4
+	fi
+	# The credential name goes as the proxy user, with "/" written %2F.
+	user=$(printf '%s' "$name" | sed 's,/,%2F,g')
+	export HTTPS_PROXY="http://$user:$SB_TOKEN@$SB_PROXY" SSL_CERT_FILE="$SB_RUNTIME/ca.pem"
+	export GH_TOKEN="through-the-broker" GH_PROMPT_DISABLED=1
+fi
+exec "$REAL" "$@"

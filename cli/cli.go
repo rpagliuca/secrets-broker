@@ -33,6 +33,14 @@ const usage = `usage: secrets-broker <command> [flags]
   aws-credentials ACCOUNT            print temporary AWS credentials (for credential_process)
   access                             list what this client may ask for and what it holds
   request [-for 4h] NAME[=WHY]...    ask ahead, in one question, for what a task needs
+  wait [-for 4h] NAME[=WHY]...       ask, and wait for the answer (exit 0 granted,
+                                     2 refused in all or part, 3 no answer in 24 h)
+  sql NAME TIMEOUT WHY < QUERY       ask for one query on a database, wait for the
+                                     approver to read it, run it once, print TSV
+  encrypt -name NAME -recipient FILE [-config FILE] [-host HOST]... [-file FILE]
+          [-out DIR] [-rotation FILE [-new] [-expires 90d|DATE]]
+                                     write DIR/NAME.age for the store, bound to the
+                                     hosts of the names that use it
 
 Commands sent to the control socket (-socket PATH):
 
@@ -163,6 +171,52 @@ func Main(customize Customize) {
 			log.Fatal(strings.TrimSpace(string(out)))
 		}
 		os.Stdout.Write(out)
+	case "wait", "sql":
+		addr := fs.String("url", "http://127.0.0.1:8471", "address of the broker")
+		env := fs.String("token-env", "SECRETS_BROKER_TOKEN", "environment variable that holds the client token")
+		d := fs.String("for", "", "how long the credentials are needed (wait), a suggestion to the approver")
+		fs.Parse(args)
+		c, err := newClient(*addr, *env)
+		if err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
+		if cmd == "sql" {
+			if fs.NArg() != 3 {
+				log.Fatal("usage: secrets-broker sql NAME TIMEOUT WHY < QUERY")
+			}
+			query, err := io.ReadAll(os.Stdin)
+			if err != nil || strings.TrimSpace(string(query)) == "" {
+				log.Fatal("secrets-broker: the query comes on standard input")
+			}
+			os.Exit(runSQL(c, fs.Arg(0), fs.Arg(1), fs.Arg(2), string(query), 5*time.Second, 24*time.Hour, os.Stdout, os.Stderr))
+		}
+		if fs.NArg() == 0 {
+			log.Fatal(`usage: secrets-broker wait [-for 4h] NAME[=WHY]...`)
+		}
+		names, reasons := parseNames(fs.Args())
+		payload := map[string]any{"credentials": names, "reasons": reasons}
+		if *d != "" {
+			payload["duration"] = *d
+		}
+		os.Exit(wait(c, payload, names, 5*time.Second, 24*time.Hour, os.Stdout, os.Stderr))
+	case "encrypt":
+		var o encryptOptions
+		fs.StringVar(&o.name, "name", "", "name of the secret (written as DIR/NAME.age)")
+		fs.StringVar(&o.file, "file", "", "file with the value, copied as is; without it, standard input without the final newline")
+		fs.StringVar(&o.config, "config", "", "broker configuration, to find the hosts of the names that use the secret")
+		fs.StringVar(&o.recipient, "recipient", "", "file with the vault's public key (age)")
+		fs.StringVar(&o.out, "out", ".", "directory of the encrypted secrets")
+		fs.StringVar(&o.rotation, "rotation", "", "rotation file to update (optional)")
+		fs.BoolVar(&o.isNew, "new", false, "the value is new (it was changed at the service): record the rotation")
+		fs.StringVar(&o.expires, "expires", "", "validity at the service: days (90d) or a date (2027-02-24)")
+		fs.Func("host", "host the secret is bound to (repeatable); without it, from -config", func(v string) error {
+			o.hosts = append(o.hosts, v)
+			return nil
+		})
+		fs.Parse(args)
+		if err := encrypt(o, os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("secrets-broker: %v", err)
+		}
 	case "token":
 		raw := make([]byte, 32)
 		rand.Read(raw)
