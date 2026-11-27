@@ -58,6 +58,17 @@ type Request struct {
 	// NeedsCode lists the credentials of the request that can only be
 	// granted with a one-time code typed by the approver (see CodeHooks).
 	NeedsCode []string `json:"needs_code,omitempty"`
+	// Queries is the exact SQL the client wants to run, by database name,
+	// with the time it asks for. Like Reasons it is the client's text; the
+	// approver grants that text, once.
+	Queries map[string]Query `json:"queries,omitempty"`
+}
+
+// Query is one SQL statement a client asks to run on a database, and how
+// long it may take.
+type Query struct {
+	SQL     string   `json:"sql"`
+	Timeout Duration `json:"timeout"`
 }
 
 // maxReason is how long a reason may be, in characters; minReason is how
@@ -225,6 +236,7 @@ type grantEntry struct {
 	name         string    // of the principal, in the request that was granted
 	reason       string    // of the client, in the request that was granted
 	lastUse      time.Time // last use authorized under the grant in force
+	query        *Query    // the SQL granted, for a database: one run
 }
 
 type pendingRequest struct {
@@ -284,12 +296,12 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 	case len(g.pending) >= maxPending:
 		return &ApprovalError{}
 	}
-	return &ApprovalError{RequestID: g.ask(now, p, []string{credential}, hosts, 0, nil)}
+	return &ApprovalError{RequestID: g.ask(now, p, []string{credential}, hosts, 0, nil, nil)}
 }
 
 // ask creates one waiting request for credentials and notifies the
 // approver. The caller holds the lock and has checked each credential.
-func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) string {
+func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string, queries map[string]Query) string {
 	raw := make([]byte, 4)
 	rand.Read(raw)
 	req := Request{ID: hex.EncodeToString(raw), Principal: p, Credential: credentials[0], Credentials: credentials,
@@ -303,6 +315,12 @@ func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, su
 				req.Reasons = map[string]string{}
 			}
 			req.Reasons[c] = why
+		}
+		if q, ok := queries[c]; ok {
+			if req.Queries == nil {
+				req.Queries = map[string]Query{}
+			}
+			req.Queries[c] = q
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), g.ttl)
@@ -330,6 +348,11 @@ func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, su
 // already waiting in another request, are left out. It returns the id of
 // the request that was created, or "" when there was nothing left to ask.
 func (g *Grants) Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error) {
+	return g.RequestQueries(p, credentials, hosts, suggested, reasons, nil)
+}
+
+// RequestQueries is Request with the SQL to run on the databases asked for.
+func (g *Grants) RequestQueries(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string, queries map[string]Query) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
@@ -365,7 +388,7 @@ func (g *Grants) Request(p Principal, credentials, hosts []string, suggested tim
 	case len(g.pending) >= maxPending:
 		return "", &ApprovalError{}
 	}
-	return g.ask(now, p, ask, hosts, suggested, reasons), nil
+	return g.ask(now, p, ask, hosts, suggested, reasons, queries), nil
 }
 
 // Granted implements Approver.
@@ -503,6 +526,10 @@ func (g *Grants) DecideWhy(id string, d time.Duration, by string, codes map[stri
 				e.until = limit
 			}
 			e.name, e.reason, e.lastUse = req.Principal.Name, req.Reasons[c], time.Time{}
+			e.query = nil
+			if q, ok := req.Queries[c]; ok {
+				e.query = &q
+			}
 		}
 	}
 	said := ""
@@ -539,6 +566,21 @@ func (g *Grants) Revoke(principal, by string) int {
 		e.until = time.Time{}
 	}
 	return n
+}
+
+// UseQuery takes the SQL granted to a client on a database and ends the
+// grant: each approval runs one statement, the one the approver read.
+func (g *Grants) UseQuery(principal, credential string) (Query, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	e := g.entries[grantKey{principal, credential}]
+	if e == nil || !now.Before(e.until) || e.query == nil {
+		return Query{}, ErrNotGranted
+	}
+	q := *e.query
+	e.until, e.query, e.lastUse = time.Time{}, nil, now
+	return q, nil
 }
 
 // End ends one grant before its time, when what it gave is gone: an AWS

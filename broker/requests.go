@@ -34,6 +34,11 @@ func (c *Config) catalog(groups []string) map[string][]string {
 			out[cm.grantName()] = []string{cm.grantName()}
 		}
 	}
+	for i := range c.Databases {
+		if d := &c.Databases[i]; allowed(d.Groups) {
+			out[d.grantName()] = []string{d.Address}
+		}
+	}
 	if c.SSH != nil {
 		for i := range c.SSH.Targets {
 			if t := &c.SSH.Targets[i]; allowed(t.Groups) {
@@ -79,6 +84,7 @@ func (c *Config) known(name string) bool {
 	}
 	return slices.ContainsFunc(c.AWS, func(a AWSAccount) bool { return a.grantName() == name }) ||
 		slices.ContainsFunc(c.Commands, func(cm Command) bool { return cm.grantName() == name }) ||
+		slices.ContainsFunc(c.Databases, func(d Database) bool { return d.grantName() == name }) ||
 		slices.ContainsFunc(c.Credentials, func(cr Credential) bool {
 			sc, _ := cr.scopeFor(name)
 			return cr.Name == name || (sc != nil && !strings.Contains(name, "{"))
@@ -158,8 +164,9 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 			Credentials []string          `json:"credentials"`
 			Duration    Duration          `json:"duration"`
 			Reasons     map[string]string `json:"reasons"`
+			Queries     map[string]Query  `json:"queries"`
 		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in) != nil || len(in.Credentials) == 0 {
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10+maxQuery*4)).Decode(&in) != nil || len(in.Credentials) == 0 {
 			deny(http.StatusBadRequest, `send {"credentials": ["name", ...], "duration": "4h"}`)
 			return
 		}
@@ -172,7 +179,39 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 			}
 			hosts = append(hosts, h...)
 		}
-		id, err := asker.Request(p, in.Credentials, hosts, time.Duration(in.Duration), in.Reasons)
+		// A database is asked for with the exact query it will run.
+		for n := range in.Queries {
+			if cfg.database(n) == nil || !slices.Contains(in.Credentials, n) {
+				deny(http.StatusBadRequest, "a query is for a database named in the request")
+				return
+			}
+		}
+		for _, n := range in.Credentials {
+			if db := cfg.database(n); db != nil {
+				q, ok := in.Queries[n]
+				if !ok {
+					deny(http.StatusBadRequest, `a database is asked for with its query: "queries": {"`+n+`": {"sql": "...", "timeout": "30s"}}`)
+					return
+				}
+				if err := db.checkQuery(q); err != nil {
+					deny(http.StatusBadRequest, err.Error())
+					return
+				}
+			}
+		}
+		var id string
+		if len(in.Queries) > 0 {
+			qa, ok := s.Approver.(interface {
+				RequestQueries(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string, queries map[string]Query) (string, error)
+			})
+			if !ok {
+				deny(http.StatusNotImplemented, "this approver cannot be asked for queries")
+				return
+			}
+			id, err = qa.RequestQueries(p, in.Credentials, hosts, time.Duration(in.Duration), in.Reasons, in.Queries)
+		} else {
+			id, err = asker.Request(p, in.Credentials, hosts, time.Duration(in.Duration), in.Reasons)
+		}
 		var ae *ApprovalError
 		if err != nil && !errors.As(err, &ae) {
 			deny(http.StatusBadRequest, err.Error())

@@ -467,6 +467,33 @@ longer holds the master and cannot delete: what it issued ends at its expiry.
 On Cloudflare the tokens are named `secrets-broker <credential> <client>
 <time>`.
 
+## SQL, one approved statement at a time
+
+A database entry lets a client run SQL it wrote, after the approver read it.
+The client never gets a connection or a password:
+
+```json
+"databases": [
+  {"name": "prod-reader", "groups": ["team-a"], "address": "db.example.com:3306",
+   "user": "reader", "aws": "prod-db-role", "ca_file": "/etc/secrets-broker/rds-ca.pem",
+   "write": false, "max_rows": 1000, "max_timeout": "5m"}
+]
+```
+
+1. The client asks with the exact statement and the time it needs:
+   `POST /requests {"credentials": ["sql:prod-reader"], "queries": {"sql:prod-reader": {"sql": "SELECT ...", "timeout": "30s"}}, "reasons": {...}}`.
+2. The approver reads the statement (the notification only says it is on the
+   broker) and approves it with the one-time code of the AWS account named in
+   `aws`, which must have `mfa_serial`.
+3. `POST /sql/sql:prod-reader` runs that statement once and ends the grant.
+   The answer is JSON: `columns`, `rows` (text, `null` for NULL), `truncated`.
+
+The broker signs in with an IAM authentication token (MySQL, TLS checked
+against `ca_file`). Without `write`, the statement runs in a READ ONLY
+transaction; `max_execution_time` and the context follow the approved
+timeout, and at most `max_rows` rows come back. The statement is written to
+the audit log; the result is not.
+
 ## Commands
 
 For what is neither a header nor SSH, such as a VPN, the broker can run a
