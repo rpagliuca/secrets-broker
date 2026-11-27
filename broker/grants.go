@@ -537,6 +537,23 @@ func (g *Grants) Revoke(principal, by string) int {
 	return n
 }
 
+// End ends one grant before its time, when what it gave is gone: an AWS
+// session opened with a one-time code that is over (or was never opened,
+// for a grant made before the account required the code). Without this the
+// grant would still be in force, a new request would not ask, and the client
+// could neither use the credential nor ask for it.
+func (g *Grants) End(principal, credential, why string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	e := g.entries[grantKey{principal, credential}]
+	if e == nil || !now.Before(e.until) {
+		return
+	}
+	e.until = time.Time{}
+	g.audit.Record(Event{Time: now.UTC(), Decision: "revoked", Reason: why, Principal: principal, Credential: credential})
+}
+
 // Block is a client kept from asking again for a credential, after a refusal.
 type Block struct {
 	Principal  string    `json:"principal"`
