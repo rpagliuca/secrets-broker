@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sort"
 	"strconv"
@@ -196,6 +197,10 @@ type Grants struct {
 	mu      sync.Mutex
 	entries map[grantKey]*grantEntry
 	pending map[string]*pendingRequest
+
+	// notifying counts the notifier goroutines, so that Close can wait for
+	// them to take their questions off the approver's devices.
+	notifying sync.WaitGroup
 }
 
 // CodeHooks teaches the grants about credentials that need a one-time code
@@ -307,7 +312,11 @@ func (g *Grants) ask(now time.Time, p Principal, credentials, hosts []string, su
 	}
 	g.record(req, "requested", "request "+req.ID)
 	if g.notifier != nil {
-		go g.notifier.Notify(ctx, g, req)
+		g.notifying.Add(1)
+		go func() {
+			defer g.notifying.Done()
+			g.notifier.Notify(ctx, g, req)
+		}()
 	}
 	return req.ID
 }
@@ -612,6 +621,26 @@ func (g *Grants) expire(now time.Time) {
 		if e.pending == "" && !now.Before(e.until) && !now.Before(e.blockedUntil) {
 			delete(g.entries, key)
 		}
+	}
+}
+
+// Close ends every waiting request, as the broker stops, and waits up to
+// wait for the notifiers to take the questions off the approver's devices:
+// after a restart nobody would read the answers, and a question left there
+// looks answerable. The requests are not recorded as refused or expired;
+// the clients ask again after the restart.
+func (g *Grants) Close(wait time.Duration) {
+	g.mu.Lock()
+	for _, req := range g.pending {
+		g.drop(req)
+	}
+	g.mu.Unlock()
+	done := make(chan struct{})
+	go func() { g.notifying.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		log.Printf("grants: notifiers still running after %s; questions may be left on the devices", wait)
 	}
 }
 
