@@ -727,6 +727,41 @@ profile or a replaced binary in that account would see the key.
   contains the client id, credential name, host, method, path and status,
   never a secret or a token.
 
+## Phone panel
+
+`cmd/secrets-broker-web` (package `web`) is a small web panel for the
+approver's phone: requests waiting (each read full screen, with the client's
+reasons, the SQL behind "View query", partial grants and a refusal text),
+grants in force with their last use, cooldowns, usage by client or by
+credential, and the vault (open it with a passkey, close it, rotation and
+expiry of each secret). Granting needs a passkey with user verification,
+besides a Google login limited to the configured e-mails; revoking, denying
+and closing the vault only need the login. It listens on loopback only and a
+tunnel publishes it. Pages are in English or Brazilian Portuguese
+(`"language": "pt-BR"`).
+
+```json
+{
+  "listen": "127.0.0.1:8476", "base_url": "https://panel.example.com",
+  "client_id": "…apps.googleusercontent.com", "client_secret_env": "PANEL_CLIENT_SECRET",
+  "cookie_key_env": "PANEL_COOKIE_KEY", "emails": ["approver@example.com"],
+  "control_socket": "$XDG_RUNTIME_DIR/secrets-broker/control.sock", "broker_unit": "secrets-broker",
+  "broker_config": "$HOME/.config/secrets-broker/config.json",
+  "passkeys": "$HOME/.config/secrets-broker-web/passkeys.json", "risks": "/etc/secrets-broker/risks.json",
+  "rotation": "/etc/secrets-broker/rotation.json", "vault_public_key": "/etc/secrets-broker/vault.pub",
+  "language": "en", "time_zone": "Europe/Lisbon",
+  "mfa_devices": {"key1": "12345678"},
+  "mfa_code_command": "ykman --device {serial} oath accounts code -s {account}"
+}
+```
+
+`risks.json` classifies each name as the broker grants it:
+`{"org/aws/prod/read": {"risk": "high", "why": "…", "mfa": "key1 · Issuer (account)", "mfa_enforced_by_provider": true}}`.
+`secrets-broker-web registration-code` makes the one-time code to register a
+passkey; `secrets-broker-web store-vault-key` stores the vault key for the
+passkeys enabled to open the vault. A program can embed the panel with
+`web.Main` and add `web.Options{Names: …}` to name clients from elsewhere.
+
 ## Using it as a library
 
 The reference binary is a thin wrapper around three interfaces of the

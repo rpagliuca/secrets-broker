@@ -1,0 +1,61 @@
+{{template "head-focus" .}}
+{{with .Request}}
+<article class="focus">
+  <header class="who">
+    <h2>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</h2>
+    <p class="muted">{{.Session}} · {{t "request.asked_ago" .Ago}}</p>
+  </header>
+
+  {{$many := gt (len .Credentials) 1}}
+  {{range .Credentials}}
+  <section class="req-secret {{.Badge.Risk}}">
+    <p class="risk-line"><span class="risk {{.Badge.Risk}}">{{t "risk.badge" .Badge.Label}}</span>{{if and $many $.HasPasskey}}
+      <label class="grant"><input type="checkbox" class="grant" data-credential="{{.Badge.Name}}" checked> {{t "request.grant"}}</label>{{end}}</p>
+    <p class="secret-name" title="{{.Badge.Name}}">{{range $i, $part := .Parts}}{{if $i}}<span class="slash"> / </span>{{end}}<span class="part">{{$part}}</span>{{end}}</p>
+    <div class="block why-block">
+      <span class="label">{{t "request.reason"}}</span>
+      {{if .Reason}}<p>{{.Reason}}</p>{{else}}<p class="muted">{{t "request.no_reason"}}</p>{{end}}
+    </div>
+    {{if .Query}}
+    <div class="block query">
+      <span class="label">{{if .Timeout}}{{t "query.label_timeout" .Timeout}}{{else}}{{t "query.label"}}{{end}}</span>
+      <p class="muted">{{if eq .QueryLines 1}}{{t "query.one_line"}}{{else}}{{t "query.n_lines" .QueryLines}}{{end}} {{t "query.read_all"}}</p>
+      <button type="button" class="view-query">{{t "query.view"}}</button>
+      <dialog class="query-full"><div class="query-top"><strong>{{.Badge.Name}}</strong>{{if .Timeout}} · {{t "query.at_most" .Timeout}}{{end}} <span class="query-actions"><button type="button" class="copy" data-copy="{{.Query}}">{{t "query.copy"}}</button> <button type="button" class="close-query">{{t "query.close"}}</button></span></div><pre>{{.Query}}</pre></dialog>
+    </div>
+    {{end}}
+    <div class="block because">
+      <span class="label">{{t "request.why_risk" .Badge.Label}}</span>
+      <p>{{.Badge.Why}}</p>
+    </div>
+    {{if .NeedsCode}}
+    <div class="block mfa">
+      <span class="label">{{t "request.code"}}</span>
+      {{if .Badge.MFAAccount}}<div class="mfa-path"><p>{{with .Badge.MFAKey}}<span class="key">{{.}}</span> {{end}}<span class="mfa-account">{{.Badge.MFAAccount}}</span></p><p class="copies"><button type="button" class="copy" data-copy="{{.Badge.MFAAccount}}">{{t "mfa.copy_search"}}</button>{{with .Badge.MFACommand}} <button type="button" class="copy" data-copy="{{.}}" title="{{.}}">{{t "mfa.copy_command"}}</button>{{end}}</p></div>{{else}}<p class="muted">{{t "mfa.no_path"}}</p>{{end}}
+      <input class="code" data-credential="{{.Badge.Name}}" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="8" placeholder="{{t "mfa.placeholder"}}" aria-label="{{t "mfa.aria" .Badge.Name}}">
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+  <p class="muted">{{t "reason.unverified_all"}}{{if and $many $.HasPasskey}} {{t "request.uncheck_help"}}{{end}}</p>
+
+  <section class="decision">
+    {{if $.HasPasskey}}
+    <span class="label">{{if .Suggested}}{{t "request.duration_asked" .Suggested}}{{else}}{{t "request.duration"}}{{end}}</span>
+    <div class="durations">
+      {{range .Durations}}<button type="button" class="duration{{if .Suggested}} chosen{{end}}" data-seconds="{{.Seconds}}" data-label="{{.Label}}">{{.Label}}</button>{{end}}
+    </div>
+    {{else}}<p class="muted">{{t "request.need_passkey_1"}} <a href="/passkey">{{t "request.need_passkey_2"}}</a>.</p>{{end}}
+    <label class="label" for="why">{{t "request.why_label"}}</label>
+    <textarea id="why" name="why" form="deny" class="why" maxlength="300" rows="2" placeholder="{{t "request.why_placeholder"}}"></textarea>
+    <div class="actions">
+      {{if $.HasPasskey}}<button type="button" id="approve" class="approve" data-request="{{.ID}}" disabled>{{t "approve.choose_duration"}}</button>{{end}}
+      <form id="deny" method="post" action="/deny"><input type="hidden" name="id" value="{{.ID}}"><button class="deny">{{t "request.deny"}}</button></form>
+    </div>
+  </section>
+</article>
+{{else}}
+<p class="notice">{{t "request.gone_long"}}</p>
+<p><a href="/">{{t "request.back"}}</a></p>
+{{end}}
+{{template "foot" .}}

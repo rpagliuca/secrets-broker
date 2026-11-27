@@ -1,0 +1,37 @@
+{{define "head"}}{{template "page-start" .}}
+<header>
+  <a class="brand" href="/">secrets-broker</a>
+  <nav><a href="/">{{t "nav.now"}}</a> <a href="/usage">{{t "nav.usage"}}</a> <a href="/vault">{{t "nav.vault"}}</a> <a href="/passkey">{{t "nav.passkey"}}</a> <a href="/login/out">{{t "nav.sign_out"}}</a></nav>
+</header>
+{{template "content-start" .}}{{end}}
+
+{{define "head-focus"}}{{template "page-start" .}}
+<header class="focus">
+  <a class="brand" href="/">← {{t "nav.back"}}</a>
+  <span class="muted">secrets-broker</span>
+</header>
+{{template "content-start" .}}{{end}}
+
+{{define "page-start"}}<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Requests}}({{len .Requests}}) {{end}}secrets-broker</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body data-sealed-tag="{{t "title.sealed"}}" data-copied="{{t "copy.done"}}" data-copy-failed="{{t "copy.failed"}}" data-approve-label="{{t "approve.button"}}" data-approve-some="{{t "approve.button_some"}}" data-choose-duration="{{t "approve.choose_duration"}}" data-mark-one="{{t "approve.mark_one"}}" data-has-why="{{t "approve.has_why"}}" data-not-approved="{{t "approve.not_done"}}" data-not-registered="{{t "passkey.not_done"}}" data-no-prf="{{t "vault.no_prf"}}" data-no-envelope="{{t "vault.no_envelope"}}" data-vault-failed="{{t "vault.failed"}}">{{end}}
+
+{{define "content-start"}}<main>
+{{if .Notice}}<p class="notice" id="notice" role="status">{{.Notice}}</p>{{end}}
+<details id="history" class="history" hidden><summary>{{t "history.title"}}</summary><ol></ol></details>
+<p class="notice error" id="error" role="alert" hidden></p>
+{{end}}
+
+{{define "foot"}}
+</main>
+<footer>{{.Email}}</footer>
+</body>
+</html>{{end}}
