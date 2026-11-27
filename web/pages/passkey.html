@@ -1,0 +1,20 @@
+{{template "head" .}}
+<section>
+<h2>{{t "passkey.title"}}</h2>
+<p>{{t "passkey.help"}}</p>
+{{if not .Passkeys}}<p class="empty">{{t "passkey.none_registered"}}</p>{{end}}
+<ul class="lines">
+{{range .Passkeys}}<li><strong>{{.Name}}</strong> <span class="muted">{{t "passkey.registered_on" .Created}}</span></li>{{end}}
+</ul>
+</section>
+
+<section>
+<h2>{{t "passkey.register"}}</h2>
+<p class="muted">{{t "passkey.code_help"}}</p>
+<form id="register" class="card">
+  <label>{{t "passkey.code"}} <input name="code" autocomplete="off" autocapitalize="none" required></label>
+  <label>{{t "passkey.device"}} <input name="name" value="{{t "passkey.device_default"}}" required></label>
+  <button>{{t "passkey.register"}}</button>
+</form>
+</section>
+{{template "foot" .}}

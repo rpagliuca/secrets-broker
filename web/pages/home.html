@@ -1,0 +1,92 @@
+{{template "head" .}}
+{{if .Renew}}<p class="notice error">{{t "home.renew"}} {{range $i, $r := .Renew}}{{if $i}}; {{end}}{{$r}}{{end}}. <a href="/vault">{{t "home.see_vault"}}</a></p>{{end}}
+
+<div id="live">
+{{template "live" .}}</div>
+
+{{template "foot" .}}
+
+{{define "badge"}}<span class="risk {{.Risk}}" title="{{.Why}}">{{t "risk.badge" .Label}}</span> <span class="secret">{{.Name}}</span>{{end}}
+
+{{define "numbers"}}<span class="muted">
+  {{if .Open}}<span class="open">{{t "usage.open_until" .Until}}</span> · {{end}}{{t "usage.uses" .Uses}}{{if .Denials}}, {{t "usage.denials" .Denials}}{{end}}{{if .Window}} · {{.Window}}{{end}} · {{t "usage.requests_grants" .Requests .Grants}}</span>{{end}}
+
+{{define "lines"}}{{if .Lines}}<ul class="lines">
+  {{range .Lines}}
+    <li{{if .Denied}} class="blocked"{{end}}>
+      <span class="when">{{.When}}</span> {{.Method}} <span class="target">{{.Target}}</span>
+      {{if .Status}}<span class="muted">{{.Status}}</span>{{end}}
+      {{if .Denied}}<div class="muted">{{.Reason}}</div>{{end}}
+    </li>
+  {{end}}
+  </ul>{{else}}<p class="muted">{{t "usage.no_uses"}}</p>{{end}}{{end}}
+
+{{define "live"}}{{if .BrokerError}}<p class="notice error">{{t "err.broker" .BrokerError}}</p>{{end}}
+{{if .Sealed}}<p class="notice error notice-sealed">{{t "home.sealed"}} <a href="/vault">{{t "home.open_vault"}}</a></p>{{end}}
+<section>
+<h2>{{t "home.waiting"}}</h2>
+{{if not .Requests}}<p class="empty">{{t "home.no_waiting"}}</p>{{end}}
+{{range .Requests}}
+<a class="card pending summary-card{{if .High}} high{{end}}" href="/request/{{.ID}}">
+  <h3>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</h3>
+  <p class="muted">{{.Session}} · {{t "home.ago" .Ago}}</p>
+  <p class="counts">
+    {{if eq (len .Credentials) 1}}{{t "home.one_secret"}}{{else}}{{t "home.n_secrets" (len .Credentials)}}{{end}}
+    {{if .Highs}}<span class="risk high">{{t "home.n_high" .Highs}}</span>{{end}}
+    {{if .Mediums}}<span class="risk medium">{{t "home.n_medium" .Mediums}}</span>{{end}}
+    {{if .Lows}}<span class="risk low">{{t "home.n_low" .Lows}}</span>{{end}}
+    {{if .NeedsCode}}<span class="risk medium">{{t "home.needs_code"}}</span>{{end}}
+  </p>
+  <p class="muted">{{t "home.tap"}}</p>
+</a>
+{{end}}
+</section>
+
+<section>
+<h2>{{t "home.open_now"}}</h2>
+{{if not .Open}}<p class="empty">{{t "home.no_open"}}</p>{{else}}
+<form method="post" action="/revoke" data-confirm="{{t "home.revoke_all_confirm"}}">
+  <input type="hidden" name="who" value="all"><button class="danger">{{t "home.revoke_all"}}</button>
+</form>
+{{end}}
+{{range .Open}}
+<article class="card{{if .High}} high{{end}}">
+  <h3>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</h3>
+  <p class="muted">{{.Session}}</p>
+  {{$session := .Session}}
+  {{range .Items}}
+  <details data-key="{{$session}}/{{.Badge.Name}}">
+    <summary>
+      <span>{{template "badge" .Badge}}</span>
+      <span class="muted">{{t "home.grant_line" .Until .Left .LastUse}}</span>
+    </summary>
+    {{if .Reason}}<p class="reason">{{.Reason}}</p>
+    <p class="muted">{{t "reason.unverified"}}</p>
+    {{else}}<p class="muted">{{t "reason.none_granted"}}</p>{{end}}
+    <p class="muted">{{t "risk.line" .Badge.Label .Badge.Why}}</p>
+  </details>
+  {{end}}
+  <form method="post" action="/revoke" data-confirm="{{t "home.revoke_one_confirm"}}">
+    <input type="hidden" name="who" value="{{.Session}}"><button class="danger">{{t "home.revoke_one"}}</button>
+  </form>
+</article>
+{{end}}
+</section>
+
+{{if .Cooldowns}}
+<section>
+<h2>{{t "home.cooldown"}}</h2>
+<p class="muted">{{t "home.cooldown_help"}}</p>
+{{range .Cooldowns}}
+<article class="card">
+  <h3>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</h3>
+  <p class="muted">{{.Session}} · {{t "home.until_left" .Until .Left}}</p>
+  <ul class="credentials">{{range .Credentials}}<li>{{template "badge" .}}</li>{{end}}</ul>
+  <form method="post" action="/unblock">
+    <input type="hidden" name="who" value="{{.Session}}"><button>{{t "home.unblock"}}</button>
+  </form>
+</article>
+{{end}}
+</section>
+{{end}}
+{{end}}

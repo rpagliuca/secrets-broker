@@ -1,0 +1,68 @@
+{{template "head" .}}
+{{if .BrokerError}}<p class="notice error">{{t "err.broker" .BrokerError}}</p>{{end}}
+
+<nav class="tabs">
+  <span>
+    {{if .BySecret}}<a href="/usage?period={{.Period}}">{{t "usage.by_client"}}</a> · <strong>{{t "usage.by_secret"}}</strong>
+    {{else}}<strong>{{t "usage.by_client"}}</strong> · <a href="/usage?view=secrets&amp;period={{.Period}}">{{t "usage.by_secret"}}</a>{{end}}
+  </span>
+  <span>
+    {{if eq .Period "24h"}}<strong>24 h</strong> · <a href="/usage?period=7d{{if .BySecret}}&amp;view=secrets{{end}}">{{t "usage.7d"}}</a>
+    {{else}}<a href="/usage?period=24h{{if .BySecret}}&amp;view=secrets{{end}}">24 h</a> · <strong>{{t "usage.7d"}}</strong>{{end}}
+  </span>
+</nav>
+
+{{if .BySecret}}
+<section>
+<h2>{{t "usage.title_secret"}}</h2>
+{{if not .Secrets}}<p class="empty">{{t "usage.none_secret"}}</p>{{end}}
+{{range .Secrets}}
+<article class="card{{if eq .Badge.Risk "high"}} high{{end}}">
+  <h3>{{template "badge" .Badge}}</h3>
+  <p class="muted">{{.Badge.Why}}</p>
+  <p class="muted">{{t "usage.uses" .Uses}}{{if .Denials}}, {{t "usage.denials" .Denials}}{{end}} · {{t "usage.n_clients" (len .Items)}}{{if .Open}} · {{t "usage.open_in" .Open}}{{end}}</p>
+  {{range .Items}}
+  <details>
+    <summary>
+      <strong>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</strong>
+      {{template "numbers" .}}
+    </summary>
+    {{template "lines" .}}
+  </details>
+  {{end}}
+</article>
+{{end}}
+</section>
+
+{{if .Unused}}
+<section>
+<h2>{{t "usage.unused"}}</h2>
+<ul class="lines">
+{{range .Unused}}<li>{{template "badge" .}} <span class="muted">{{.Why}}</span></li>{{end}}
+</ul>
+</section>
+{{end}}
+
+{{else}}
+<section>
+<h2>{{t "usage.title_client"}}</h2>
+{{if not .Sessions}}<p class="empty">{{t "usage.none_client"}}</p>{{end}}
+{{range .Sessions}}
+<article class="card{{if .High}} high{{end}}">
+  <h3>{{if .Name}}{{.Name}}{{else}}{{.Session}}{{end}}</h3>
+  <p class="muted">{{.Session}}{{if .State}} · {{.State}}{{end}}{{if .Last}} · {{t "usage.last_activity" .Last}}{{end}}</p>
+  {{range .Items}}
+  <details>
+    <summary>
+      <span>{{template "badge" .Badge}}</span>
+      {{template "numbers" .}}
+    </summary>
+    <p class="muted">{{.Badge.Why}}</p>
+    {{template "lines" .}}
+  </details>
+  {{end}}
+</article>
+{{end}}
+</section>
+{{end}}
+{{template "foot" .}}

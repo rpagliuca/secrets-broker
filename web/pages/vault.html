@@ -1,0 +1,71 @@
+{{template "head" .}}
+<script src="/static/vault.js" defer></script>
+{{if .BrokerError}}<p class="notice error">{{t "err.broker" .BrokerError}}</p>{{end}}
+{{with .Vault}}
+<section>
+<h2>{{t "vault.title"}}</h2>
+{{if .Sealed}}
+<p class="notice error">{{t "vault.sealed"}}</p>
+  {{if .CanOpen}}<button type="button" id="open-vault" class="suggested">{{t "vault.open_button"}}</button>
+  {{else}}<p class="muted">{{t "vault.open_howto"}}</p>{{end}}
+{{else}}
+<p class="notice">{{t "vault.open_state"}}</p>
+<form method="post" action="/vault/close" data-confirm="{{t "vault.close_confirm"}}">
+  <button class="danger">{{t "vault.close_button"}}</button>
+</form>
+{{end}}
+</section>
+
+<section>
+<h2>{{t "vault.with_passkey"}}</h2>
+{{if .Passkeys}}
+<ul class="lines">
+{{range .Passkeys}}
+  <li><strong>{{.Name}}</strong> <span class="muted">{{t "vault.enabled_on" .Enabled}}</span>
+    {{if .KeyStored}}<span class="tag granted">{{t "vault.opens"}}</span>{{else}}<span class="tag denied">{{t "vault.key_missing"}}</span>{{end}}
+  </li>
+{{end}}
+</ul>
+{{else}}<p class="empty">{{t "vault.none_enabled"}}</p>{{end}}
+<ol class="steps">
+  <li>
+    <strong>{{t "vault.step1"}}</strong>
+    <p class="muted">{{t "vault.step1_help"}}</p>
+    <button type="button" id="enable-passkey">{{t "vault.enable_button"}}</button>
+  </li>
+  <li>
+    <strong>{{t "vault.step2"}}</strong>
+    {{if .MissingKey}}<span class="blocked">{{t "vault.missing_for" .MissingKey}}</span>{{end}}
+    <p class="muted">{{t "vault.step2_help"}}</p>
+    <p><code>{{.StoreKeyCommand}}</code></p>
+  </li>
+  <li><strong>{{t "vault.step3"}}</strong> <span class="muted">{{t "vault.step3_help"}}</span></li>
+</ol>
+</section>
+
+{{if .KeyRotated}}
+<section>
+<h2>{{t "rotation.title"}}</h2>
+<p>{{t "rotation.key_from" .KeyRotated .KeyAge}}</p>
+{{if .Pending}}<p class="notice error">{{t "rotation.incomplete" .Pending .Total}}{{if .PendingWithMFA}}{{t "rotation.of_which_mfa" .PendingWithMFA}}{{end}}.</p>
+{{else}}<p class="notice">{{t "rotation.complete" .Total}}</p>{{end}}
+{{if .ToRenew}}<p class="notice error">{{t "rotation.renew" .ToRenew}}</p>{{end}}
+<ul class="lines">
+{{range .Secrets}}
+  <li>
+    <span class="secret">{{.File}}</span>
+    {{if not .Pending}}<span class="tag granted">{{if .WithMFA}}{{t "rotation.up_to_date_mfa"}}{{else}}{{t "rotation.up_to_date"}}{{end}}</span>
+    {{else if .WithMFA}}<span class="tag granted">{{t "rotation.pending_mfa"}}</span>
+    {{else}}<span class="tag denied">{{t "rotation.pending"}}</span>{{end}}
+    <span class="muted">{{.Rotated}}</span>
+    {{if .Expired}}<span class="tag denied">{{.Validity}}</span>
+    {{else if .Renew}}<span class="tag pending">{{t "rotation.renew_tag" .Validity}}</span>
+    {{else if .Validity}}<span class="muted">· {{.Validity}}</span>{{end}}
+    {{if .Uses}}<div class="muted">{{range $i, $u := .Uses}}{{if $i}}, {{end}}{{$u.Name}}{{if $u.WithMFA}} ({{t "rotation.with_mfa"}}){{end}}{{end}}</div>{{end}}
+  </li>
+{{end}}
+</ul>
+</section>
+{{end}}
+{{end}}
+{{template "foot" .}}
