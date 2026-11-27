@@ -166,6 +166,30 @@ func (s *services) Until(principal, credential string) time.Time {
 
 // Request asks ahead for several credentials. A service cannot ask.
 func (s *services) Request(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string) (string, error) {
+	return s.RequestQueries(p, credentials, hosts, suggested, reasons, nil)
+}
+
+// UseQuery passes to the inner approver: a service has no query grants.
+func (s *services) UseQuery(principal, credential string) (Query, error) {
+	if u, ok := s.inner.(interface {
+		UseQuery(principal, credential string) (Query, error)
+	}); ok && s.byID(principal) == nil {
+		return u.UseQuery(principal, credential)
+	}
+	return Query{}, ErrNotGranted
+}
+
+// End passes to the inner approver.
+func (s *services) End(principal, credential, why string) {
+	if e, ok := s.inner.(interface {
+		End(principal, credential, why string)
+	}); ok {
+		e.End(principal, credential, why)
+	}
+}
+
+// RequestQueries is Request with the SQL to run on the databases asked for.
+func (s *services) RequestQueries(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string, queries map[string]Query) (string, error) {
 	if s.byID(p.ID) != nil {
 		return "", errors.New("a service cannot ask for approval: its credentials are fixed in the configuration")
 	}
@@ -174,6 +198,12 @@ func (s *services) Request(p Principal, credentials, hosts []string, suggested t
 	})
 	if !ok {
 		return "", errors.New("approval is not configured: there is nothing to ask for")
+	}
+	rq, canQuery := s.inner.(interface {
+		RequestQueries(p Principal, credentials, hosts []string, suggested time.Duration, reasons map[string]string, queries map[string]Query) (string, error)
+	})
+	if len(queries) > 0 && !canQuery {
+		return "", errors.New("this approver cannot be asked for queries")
 	}
 	// What is open is not asked for.
 	credentials = slices.DeleteFunc(slices.Clone(credentials), s.open)
@@ -191,6 +221,9 @@ func (s *services) Request(p Principal, credentials, hosts []string, suggested t
 			return "", fmt.Errorf("say why you want each credential, as NAME=WHY with at least %d characters; missing for: %s",
 				minReason, strings.Join(missing, ", "))
 		}
+	}
+	if canQuery {
+		return rq.RequestQueries(p, credentials, hosts, suggested, reasons, queries)
 	}
 	return r.Request(p, credentials, hosts, suggested, reasons)
 }

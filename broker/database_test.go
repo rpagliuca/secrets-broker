@@ -77,3 +77,28 @@ func TestDatabaseQueryIsChecked(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// In front of the grants there is the services layer, as when the broker
+// runs: queries, their one run, and ending a grant all go through it.
+func TestServicesPassQueriesThrough(t *testing.T) {
+	g, _, _, _ := newTestGrants()
+	sv := &services{cfg: func() *Config { return &Config{} }, inner: g}
+	a := Principal{ID: "agent-a"}
+	q := Query{SQL: "SELECT 1", Timeout: Duration(30 * time.Second)}
+	id, err := sv.RequestQueries(a, []string{"sql:prod"}, nil, 0, nil, map[string]Query{"sql:prod": q})
+	if err != nil || id == "" {
+		t.Fatalf("%q %v", id, err)
+	}
+	if err := g.Decide(id, time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sv.UseQuery("agent-a", "sql:prod"); err != nil || got != q {
+		t.Fatalf("%+v %v", got, err)
+	}
+	id = requestID(t, g.Authorize(a, "svc", nil))
+	g.Decide(id, time.Hour, "test")
+	sv.End("agent-a", "svc", "test")
+	if g.Granted("agent-a", "svc") {
+		t.Fatal("End did not reach the grants")
+	}
+}
