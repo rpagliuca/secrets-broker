@@ -185,6 +185,11 @@ func (s *Server) aws(w http.ResponseWriter, r *http.Request) {
 		// The session was opened with the one-time code when the request
 		// was approved. The broker cannot open another on its own.
 		if s.Approver == nil || !hit || !time.Now().Before(creds.Expiration) {
+			if e, ok := s.Approver.(interface {
+				End(principal, credential, why string)
+			}); ok {
+				e.End(p.ID, acct.grantName(), "the session opened with the one-time code is over")
+			}
 			deny(http.StatusForbidden, "the session opened with the one-time code is over; ask again")
 			return
 		}

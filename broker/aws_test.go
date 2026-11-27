@@ -733,6 +733,14 @@ func TestAWSAccountWithMFANeedsTheCodeOfTheApprover(t *testing.T) {
 	if code, body := h.aws("audit", "token-a"); code != 403 || !strings.Contains(body, "ask again") {
 		t.Fatalf("after the session: %d %s", code, body)
 	}
+	// The grant ends with it, so asking again reaches the approver, with
+	// the code, instead of finding a grant that gives nothing.
+	if g.Granted("agent-a", "aws:audit") {
+		t.Fatal("the grant outlived the session")
+	}
+	if id, err := g.Request(Principal{ID: "agent-a"}, []string{"aws:audit"}, nil, 0, nil); err != nil || id == "" {
+		t.Fatalf("asking again: %q %v", id, err)
+	}
 	if len(*calls) != 2 {
 		t.Fatalf("%d STS calls", len(*calls))
 	}
