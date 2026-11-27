@@ -294,8 +294,22 @@ func (n *Notifier) expired(key string, req broker.Request, source string) {
 func (n *Notifier) retract(key, collapseID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, nil); err != nil {
+	var out struct {
+		Devices *int `json:"devices"`
+	}
+	if err := n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, &out); err != nil {
 		log.Printf("pushward: request %s: retract: %v", collapseID, err)
+		return
+	}
+	// PushWard says how many devices it could reach; 0 means the
+	// notification stays on the phone.
+	switch {
+	case out.Devices == nil:
+		log.Printf("pushward: request %s: retract accepted, devices not reported", collapseID)
+	case *out.Devices == 0:
+		log.Printf("pushward: request %s: retract reached no device", collapseID)
+	default:
+		log.Printf("pushward: request %s: retract sent to %d devices", collapseID, *out.Devices)
 	}
 }
 
