@@ -181,7 +181,9 @@ func (s *services) UseQuery(principal, credential string) (Query, error) {
 
 // End passes to the inner approver.
 func (s *services) End(principal, credential, why string) {
-	if e, ok := s.inner.(interface{ End(principal, credential, why string) }); ok {
+	if e, ok := s.inner.(interface {
+		End(principal, credential, why string)
+	}); ok {
 		e.End(principal, credential, why)
 	}
 }
