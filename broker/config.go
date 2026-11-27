@@ -174,6 +174,20 @@ func (c *Config) Validate() error {
 		}
 		cmdNames[c.Commands[i].Name] = true
 	}
+	if c.SSH != nil {
+		for _, t := range c.SSH.Targets {
+			if t.Via == "" {
+				continue
+			}
+			i := slices.IndexFunc(c.Commands, func(cm Command) bool { return cm.Name == t.Via })
+			if i < 0 {
+				return fmt.Errorf("ssh target %q: via names no command", t.Name)
+			}
+			if _, ok := c.Commands[i].Forwards[t.Address]; !ok {
+				return fmt.Errorf("ssh target %q: command %q does not forward to %s", t.Name, t.Via, t.Address)
+			}
+		}
+	}
 	if err := c.grantNamesAreUnique(); err != nil {
 		return err
 	}

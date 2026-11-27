@@ -260,6 +260,7 @@ key from its store and relays the session.
 | `targets[].host_keys` | Accepted host keys of the target. Required: there is no trust on first use |
 | `targets[].groups` | Client groups allowed to use the target |
 | `targets[].jump` | Optional. Another target to connect through |
+| `targets[].via` | Optional, not with `jump`. A command (such as a VPN) to reach `address` through: one of its `forwards` must be `address`. The broker starts the command for the client when needed, kept up by this target's grant, and connects through its socket; the client never holds the key |
 | `targets[].forward` | Optional. `host:port` destinations allowed for `ssh -L` |
 
 The secret of a target is its private key in OpenSSH format, without

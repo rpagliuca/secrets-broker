@@ -592,3 +592,76 @@ func TestReloadKeepsTheCAOfKnownHosts(t *testing.T) {
 		t.Fatalf("%d CA certificates, want 2 and no new one for an unchanged host list", n)
 	}
 }
+
+// A target reached through a command (a VPN): the broker starts the command
+// for the client and makes the SSH connection itself through its socket.
+func TestSSHTargetViaCommand(t *testing.T) {
+	signer, key := newSSHKey(t)
+	inner := newFakeTarget(t, signer.PublicKey())
+	h := newHarness(t, Credential{}, nil)
+	base := t.TempDir()
+	cfg, _ := h.srv.state()
+	next := *cfg
+	next.CommandsDir = base
+	next.Commands = []Command{{
+		Name: "vpn", Groups: []string{"team-a"},
+		// Start returns once the socket is there, as a VPN script does.
+		Start:    []string{"/bin/sh", "-c", "while [ ! -S {dir}/inner.sock ]; do sleep 0.05; done"},
+		Stop:     []string{"/bin/true"},
+		Forwards: map[string]string{inner.addr: "inner.sock"},
+	}}
+	if err := h.srv.SetConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	// The "VPN": a socket in the command's directory that reaches the target.
+	go func() {
+		for {
+			if _, err := os.Stat(base + "/vpn"); err == nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		l, err := net.Listen("unix", base+"/vpn/inner.sock")
+		if err != nil {
+			return
+		}
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				up, err := net.Dial("tcp", inner.addr)
+				if err != nil {
+					c.Close()
+					return
+				}
+				go io.Copy(up, c)
+				io.Copy(c, up)
+				c.Close()
+			}()
+		}
+	}()
+	s := newSSHHarness(t, func(cfg *SSH, store *memStore) {
+		cfg.Targets = append(cfg.Targets, SSHTarget{
+			Name: "inner", Address: inner.addr, User: "deploy", Groups: []string{"team-a"}, Via: "vpn",
+			HostKeys: []string{string(ssh.MarshalAuthorizedKey(inner.hostKey))},
+		})
+		store.m["inner"] = Secret{Value: key, Hosts: []string{"127.0.0.1"}}
+	})
+	s.proxy.Commands = h.srv
+	s.proxy.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("the target was dialled directly")
+	}
+	c := s.mustDial("inner", "token-a")
+	if out, _, _ := run(t, c, "id"); out != "ran: id" {
+		t.Fatalf("out = %q", out)
+	}
+	if !inner.saw("auth:deploy") || !h.srv.CommandActive(Principal{ID: "agent-a"}, "vpn") {
+		t.Fatalf("inner = %v; command running for the client: %v", inner.seen, h.srv.CommandActive(Principal{ID: "agent-a"}, "vpn"))
+	}
+	// Another client cannot ride on the command started for this one.
+	if _, err := h.srv.CommandVia(Principal{ID: "agent-b"}, "token-b", "vpn", inner.addr, "ssh:inner"); err == nil {
+		t.Fatal("the command was shared with another client")
+	}
+}

@@ -101,7 +101,7 @@ func (s *Server) CommandActive(p Principal, name string) bool {
 	s.runMu.Lock()
 	run := s.running[name]
 	s.runMu.Unlock()
-	return run != nil && run.by.ID == p.ID && (s.Approver == nil || s.Approver.Granted(p.ID, run.cmd.grantName()))
+	return run != nil && run.by.ID == p.ID && (s.Approver == nil || s.Approver.Granted(p.ID, run.grant))
 }
 
 // CommandForward returns the Unix socket behind a destination of a command
@@ -135,6 +135,7 @@ func (c *Config) commandFor(name string, groups []string) *Command {
 
 type runningCommand struct {
 	cmd     Command // as configured when it started
+	grant   string  // the grant that keeps it up: its own, or an SSH target's (Via)
 	by      Principal
 	token   string
 	since   time.Time
@@ -208,67 +209,124 @@ func (s *Server) command(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, "already running")
 			return
 		}
-		files := make([][]byte, len(cm.Files))
-		var needles [][]byte
-		for i, f := range cm.Files {
-			sec, err := s.store.Get(f.Secret)
-			if err == nil && !slices.Contains(sec.Hosts, cm.grantName()) {
-				err = errHostNotBound
-			}
-			if err != nil {
-				deny(statusFor(err), err.Error())
+		out, status, err := s.startCommand(cfg, cm, p, token, cm.grantName(), true)
+		if err != nil {
+			if status == http.StatusBadGateway {
+				ev.Decision, ev.Reason, ev.Status = "denied", err.Error(), status
+				s.audit.Record(ev)
+				w.WriteHeader(status)
+				w.Write(out)
 				return
 			}
-			files[i] = sec.Value
-			needles = append(needles, sec.Value)
-			for _, line := range bytes.Split(sec.Value, []byte("\n")) {
-				if line = bytes.TrimSpace(line); len(line) >= 12 {
-					needles = append(needles, line)
-				}
-			}
-		}
-		if s.Approver != nil {
-			if err := s.Approver.Authorize(p, cm.grantName(), []string{cm.grantName()}); err != nil {
-				deny(http.StatusForbidden, err.Error())
-				return
-			}
-		}
-		// One directory per command, also when its name is a path.
-		dir := filepath.Join(cfg.CommandsDir, strings.ReplaceAll(name, "/", "__"))
-		os.RemoveAll(dir)
-		err := os.MkdirAll(dir, 0o700)
-		for i, f := range cm.Files {
-			if err == nil {
-				err = os.WriteFile(filepath.Join(dir, f.Name), files[i], 0o600)
-			}
-		}
-		if err != nil {
-			os.RemoveAll(dir)
-			deny(http.StatusInternalServerError, "cannot prepare the files of the command")
+			deny(status, err.Error())
 			return
 		}
-		out, err := runArgv(commandStartTimeout, cm, cm.Start, dir, needles)
-		if err != nil {
-			runArgv(commandStopTimeout, cm, cm.Stop, dir, needles)
-			os.RemoveAll(dir)
-			ev.Decision, ev.Reason, ev.Status = "denied", "start failed: "+err.Error(), http.StatusBadGateway
-			s.audit.Record(ev)
-			w.WriteHeader(http.StatusBadGateway)
-			w.Write(out)
-			return
-		}
-		s.runMu.Lock()
-		if s.running == nil {
-			s.running = map[string]*runningCommand{}
-		}
-		s.running[name] = &runningCommand{cmd: *cm, by: p, token: token, since: time.Now(), dir: dir, needles: needles}
-		s.runMu.Unlock()
 		ev.Decision, ev.Status = "allowed", http.StatusOK
 		s.audit.Record(ev)
 		w.Write(out)
 	default:
 		deny(http.StatusNotFound, "unknown action")
 	}
+}
+
+// startCommand writes the files of a command and runs Start, for client p.
+// With authorize, the grant is checked first (and asked for when missing).
+// It returns the output, and on failure the HTTP status to answer with. The
+// caller holds cmdMu.
+func (s *Server) startCommand(cfg *Config, cm *Command, p Principal, token, grant string, authorize bool) ([]byte, int, error) {
+	files := make([][]byte, len(cm.Files))
+	var needles [][]byte
+	for i, f := range cm.Files {
+		sec, err := s.store.Get(f.Secret)
+		if err == nil && !slices.Contains(sec.Hosts, cm.grantName()) {
+			err = errHostNotBound
+		}
+		if err != nil {
+			return nil, statusFor(err), err
+		}
+		files[i] = sec.Value
+		needles = append(needles, sec.Value)
+		for _, line := range bytes.Split(sec.Value, []byte("\n")) {
+			if line = bytes.TrimSpace(line); len(line) >= 12 {
+				needles = append(needles, line)
+			}
+		}
+	}
+	if authorize && s.Approver != nil {
+		if err := s.Approver.Authorize(p, cm.grantName(), []string{cm.grantName()}); err != nil {
+			return nil, http.StatusForbidden, err
+		}
+	}
+	// One directory per command, also when its name is a path.
+	dir := filepath.Join(cfg.CommandsDir, strings.ReplaceAll(cm.Name, "/", "__"))
+	os.RemoveAll(dir)
+	err := os.MkdirAll(dir, 0o700)
+	for i, f := range cm.Files {
+		if err == nil {
+			err = os.WriteFile(filepath.Join(dir, f.Name), files[i], 0o600)
+		}
+	}
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, http.StatusInternalServerError, errors.New("cannot prepare the files of the command")
+	}
+	out, err := runArgv(commandStartTimeout, cm, cm.Start, dir, needles)
+	if err != nil {
+		runArgv(commandStopTimeout, cm, cm.Stop, dir, needles)
+		os.RemoveAll(dir)
+		return out, http.StatusBadGateway, errors.New("start failed: " + err.Error())
+	}
+	s.runMu.Lock()
+	if s.running == nil {
+		s.running = map[string]*runningCommand{}
+	}
+	s.running[cm.Name] = &runningCommand{cmd: *cm, grant: grant, by: p, token: token, since: time.Now(), dir: dir, needles: needles}
+	s.runMu.Unlock()
+	return out, http.StatusOK, nil
+}
+
+// CommandVia returns the socket behind dest of a command, for an SSH target
+// that reaches its host through the command. The command is started for the
+// client when it is not running, and is then kept up by grant (the target's)
+// instead of a grant of its own; one running for another client is not
+// shared.
+func (s *Server) CommandVia(p Principal, token, name, dest, grant string) (string, error) {
+	cfg, _ := s.state()
+	var cm *Command
+	for i := range cfg.Commands {
+		if cfg.Commands[i].Name == name {
+			cm = &cfg.Commands[i]
+		}
+	}
+	if cm == nil {
+		return "", errors.New("no such command")
+	}
+	sock, ok := cm.Forwards[dest]
+	if !ok {
+		return "", errors.New("the command does not forward to this destination")
+	}
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+	s.runMu.Lock()
+	run := s.running[name]
+	s.runMu.Unlock()
+	switch {
+	case run != nil && run.by.ID != p.ID:
+		return "", errors.New("in use by another client")
+	case run == nil:
+		ev := Event{Time: time.Now().UTC(), Method: "command-start", Credential: cm.grantName(), Principal: p.ID, Groups: p.Groups, Reason: "for " + grant}
+		if _, _, err := s.startCommand(cfg, cm, p, token, grant, false); err != nil {
+			ev.Decision, ev.Reason = "denied", ev.Reason+": "+err.Error()
+			s.audit.Record(ev)
+			return "", err
+		}
+		ev.Decision = "allowed"
+		s.audit.Record(ev)
+		s.runMu.Lock()
+		run = s.running[name]
+		s.runMu.Unlock()
+	}
+	return filepath.Join(run.dir, sock), nil
 }
 
 // stopCommand runs Stop and removes the files. The caller holds cmdMu.
@@ -316,7 +374,7 @@ func (s *Server) WatchCommands(ctx context.Context, every time.Duration) {
 			switch {
 			case err != nil || pr.ID != run.by.ID:
 				reason = "token is no longer valid"
-			case s.Approver != nil && !s.Approver.Granted(run.by.ID, run.cmd.grantName()):
+			case s.Approver != nil && !s.Approver.Granted(run.by.ID, run.grant):
 				reason = "grant ended"
 			case s.Sealed():
 				reason = ErrSealed.Error()

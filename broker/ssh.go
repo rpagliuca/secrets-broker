@@ -52,6 +52,12 @@ type SSHTarget struct {
 	Groups []string `json:"groups"`
 	// Jump names another target to connect through.
 	Jump string `json:"jump,omitempty"`
+	// Via names a command (such as a VPN) to reach Address through: one of
+	// its forwards must be Address. The broker starts the command for the
+	// client when needed, kept up by the grant of this target, and makes the
+	// SSH connection itself through the command's socket; the client never
+	// holds the key. Not with Jump.
+	Via string `json:"via,omitempty"`
 	// Forward lists the host:port destinations the client may reach with
 	// local port forwarding (ssh -L). Empty means no forwarding.
 	Forward []string `json:"forward,omitempty"`
@@ -122,6 +128,9 @@ func (c *SSH) validate() error {
 				return fmt.Errorf("ssh target %q: forward %q must be host:port", t.Name, f)
 			}
 		}
+		if t.Via != "" && t.Jump != "" {
+			return fmt.Errorf("ssh target %q: via and jump cannot be used together", t.Name)
+		}
 	}
 	for i := range c.Targets {
 		if _, err := c.chain(&c.Targets[i]); err != nil {
@@ -182,6 +191,10 @@ type CommandForwarder interface {
 	CommandKnown(name string, groups []string) bool
 	CommandActive(p Principal, name string) bool
 	CommandForward(p Principal, name, dest string) (string, error)
+	// CommandVia returns the socket behind dest of the command, starting
+	// the command for the client if it is not running; grant is the grant
+	// that keeps it up.
+	CommandVia(p Principal, token, name, dest, grant string) (string, error)
 }
 
 // NewSSHProxy creates the proxy with a new host key.
@@ -304,7 +317,7 @@ func (p *SSHProxy) handle(c net.Conn) {
 	}
 
 	ev := Event{Principal: who.ID, Groups: who.Groups, Credential: target.grantName(), Host: target.Address}
-	up, err := p.open(who, target)
+	up, err := p.open(who, token, target)
 	if err != nil {
 		reason, detail := sshReason(err)
 		p.record(ev, "denied", detail, sshConnect, "")
@@ -430,7 +443,7 @@ func (u *upstream) Close() error {
 
 // open checks the secrets, then the grant, then connects. The order keeps a
 // sealed or misconfigured broker from asking a person for approval.
-func (p *SSHProxy) open(who Principal, t *SSHTarget) (*upstream, error) {
+func (p *SSHProxy) open(who Principal, token string, t *SSHTarget) (*upstream, error) {
 	hops, err := p.cfg.Load().chain(t)
 	if err != nil {
 		return nil, err
@@ -451,9 +464,12 @@ func (p *SSHProxy) open(who Principal, t *SSHTarget) (*upstream, error) {
 	up := &upstream{}
 	for i, hop := range hops {
 		var raw net.Conn
-		if i == 0 {
+		switch {
+		case i == 0 && hop.Via != "":
+			raw, err = p.dialVia(who, token, hop, t.grantName())
+		case i == 0:
 			raw, err = p.Dial(ctx, "tcp", hop.Address)
-		} else {
+		default:
 			raw, err = up.jumps[i-1].Dial("tcp", hop.Address)
 		}
 		if err != nil {
@@ -483,6 +499,18 @@ func (p *SSHProxy) open(who Principal, t *SSHTarget) (*upstream, error) {
 		go ssh.DiscardRequests(reqs)
 	}
 	return up, nil
+}
+
+// dialVia reaches the first hop through the socket of a command.
+func (p *SSHProxy) dialVia(who Principal, token string, hop *SSHTarget, grant string) (net.Conn, error) {
+	if p.Commands == nil {
+		return nil, errors.New("commands are not available")
+	}
+	sock, err := p.Commands.CommandVia(who, token, hop.Via, hop.Address, grant)
+	if err != nil {
+		return nil, fmt.Errorf("via %s: %w", hop.Via, err)
+	}
+	return net.DialTimeout("unix", sock, 5*time.Second)
 }
 
 func (u *upstream) closeJumps() {
