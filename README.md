@@ -226,6 +226,10 @@ button per duration plus a refusal, each requiring the phone to be unlocked,
 and reads the answer from the PushWard API. The broker only makes outbound
 requests, and the integration key is a secret of its own store, bound to
 `api.pushward.app`. The notification text passes through PushWard's servers.
+Once a request is answered anywhere (phone, panel, control socket) or ends,
+the broker retracts its notification from the devices, trying again a few
+times when PushWard refuses for its rate limit or the network fails, and
+logs how many devices the retract reached.
 
 ## SSH
 

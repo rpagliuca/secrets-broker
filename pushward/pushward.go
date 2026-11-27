@@ -228,6 +228,10 @@ var (
 	// sealedRetry is how often a request made while sealed checks for the unseal.
 	sealedRetry = 15 * time.Second
 	retryDelay  = 5 * time.Second
+	// retractDelays are the pauses before each new attempt to retract, after
+	// a transient failure (PushWard allows 10 retracts a minute, in bursts
+	// of 5, so several requests answered at once can be refused).
+	retractDelays = []time.Duration{3 * time.Second, 15 * time.Second, 45 * time.Second}
 )
 
 func (n *Notifier) call(ctx context.Context, key, method, path string, in, out any) error {
@@ -290,26 +294,36 @@ func (n *Notifier) expired(key string, req broker.Request, source string) {
 	}
 }
 
-// retract removes the notification from the devices. Best effort.
+// retract removes the notification from the devices. Best effort: a
+// transient failure (rate limit, network) is tried again after each of
+// retractDelays.
 func (n *Notifier) retract(key, collapseID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var out struct {
-		Devices *int `json:"devices"`
-	}
-	if err := n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, &out); err != nil {
-		log.Printf("pushward: request %s: retract: %v", collapseID, err)
-		return
-	}
-	// PushWard says how many devices it could reach; 0 means the
-	// notification stays on the phone.
-	switch {
-	case out.Devices == nil:
-		log.Printf("pushward: request %s: retract accepted, devices not reported", collapseID)
-	case *out.Devices == 0:
-		log.Printf("pushward: request %s: retract reached no device", collapseID)
-	default:
-		log.Printf("pushward: request %s: retract sent to %d devices", collapseID, *out.Devices)
+	for attempt := 0; ; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var out struct {
+			Devices *int `json:"devices"`
+		}
+		err := n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, &out)
+		cancel()
+		if err == nil {
+			// PushWard says how many devices it could reach; 0 means the
+			// notification stays on the phone.
+			switch {
+			case out.Devices == nil:
+				log.Printf("pushward: request %s: retract accepted, devices not reported", collapseID)
+			case *out.Devices == 0:
+				log.Printf("pushward: request %s: retract reached no device", collapseID)
+			default:
+				log.Printf("pushward: request %s: retract sent to %d devices", collapseID, *out.Devices)
+			}
+			return
+		}
+		if !transient(err) || attempt >= len(retractDelays) {
+			log.Printf("pushward: request %s: retract: %v (gave up after %d attempts)", collapseID, err, attempt+1)
+			return
+		}
+		log.Printf("pushward: request %s: retract: %v; trying again in %s", collapseID, err, retractDelays[attempt])
+		time.Sleep(retractDelays[attempt])
 	}
 }
 
