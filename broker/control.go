@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -147,7 +148,13 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 		}
 		// "-only NAME,NAME" grants part of the request and refuses the rest.
 		// NAME=CODE gives the one-time code of a credential that needs one.
+		// "-why TEXT..." comes last: what the client is told about the
+		// credentials left out.
 		rest := args[2:]
+		why := ""
+		if i := slices.Index(rest, "-why"); i >= 0 {
+			why, rest = strings.Join(rest[i+1:], " "), rest[:i]
+		}
 		var only []string
 		if len(rest) > 0 && rest[0] == "-only" {
 			if len(rest) < 2 || rest[1] == "" {
@@ -166,15 +173,16 @@ func (c *Control) run(args []string, rest io.Reader) (string, error) {
 			}
 			codes[name] = code
 		}
-		if err := c.Grants.DecideSome(args[0], d, "control socket", codes, only); err != nil {
+		if err := c.Grants.DecideWhy(args[0], d, "control socket", codes, only, why); err != nil {
 			return "", err
 		}
 		if len(only) > 0 {
 			return fmt.Sprintf("ok: granted %s for %s; the rest of the request was refused", strings.Join(only, ","), d), nil
 		}
 		return "ok: granted for " + d.String(), nil
-	case cmd == "deny" && len(args) == 1:
-		if err := c.Grants.Decide(args[0], 0, "control socket"); err != nil {
+	case cmd == "deny" && len(args) >= 1:
+		// Anything after the id is what the client is told.
+		if err := c.Grants.DecideWhy(args[0], 0, "control socket", nil, nil, strings.Join(args[1:], " ")); err != nil {
 			return "", err
 		}
 		return "ok: refused", nil

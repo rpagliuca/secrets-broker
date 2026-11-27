@@ -294,3 +294,58 @@ func TestButtonsKeepTheirOrder(t *testing.T) {
 		t.Fatalf("buttons = %s", got)
 	}
 }
+
+func TestCloseTakesTheQuestionOffThePhone(t *testing.T) {
+	f := newFake(t) // never answers
+	g := broker.NewGrants(approval(), f.notifier(), nil)
+	g.Authorize(broker.Principal{ID: "S-1"}, "svc", nil)
+	waitFor(t, "the notification", func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.sends == 1 })
+	g.Close(3 * time.Second)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retracted == "" {
+		t.Fatal("the question was left on the phone after Close")
+	}
+	if len(g.Pending()) != 0 {
+		t.Fatal("a request survived Close")
+	}
+}
+
+// sealable is a store that answers ErrSealed until it is opened.
+type sealable struct {
+	mu     sync.Mutex
+	open   bool
+	inside store
+}
+
+func (s *sealable) Get(name string) (broker.Secret, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.open {
+		return broker.Secret{}, broker.ErrSealed
+	}
+	return s.inside.Get(name)
+}
+
+func TestRequestMadeWhileSealedIsSentAfterTheUnseal(t *testing.T) {
+	defer func(d time.Duration) { sealedRetry = d }(sealedRetry)
+	sealedRetry = 10 * time.Millisecond
+	f := newFake(t)
+	n := f.notifier()
+	s := &sealable{inside: n.Store.(store)}
+	n.Store = s
+	g := broker.NewGrants(approval(), n, nil)
+	g.Authorize(broker.Principal{ID: "S-1"}, "svc", nil)
+	time.Sleep(50 * time.Millisecond)
+	f.mu.Lock()
+	sends := f.sends
+	f.mu.Unlock()
+	if sends != 0 {
+		t.Fatal("sent while sealed")
+	}
+	s.mu.Lock()
+	s.open = true
+	s.mu.Unlock()
+	waitFor(t, "the notification after the unseal", func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.sends == 1 })
+	g.Close(time.Second)
+}

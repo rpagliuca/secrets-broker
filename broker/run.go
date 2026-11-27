@@ -122,6 +122,9 @@ func Run(ctx context.Context, o Options) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if ctl.Grants != nil {
+				ctl.Grants.Close(15 * time.Second)
+			}
 			return hs.Close()
 		case err := <-errc:
 			hs.Close()

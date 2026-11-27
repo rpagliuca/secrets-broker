@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // clock is a time source the tests move by hand.
@@ -409,5 +410,54 @@ func TestPartialGrant(t *testing.T) {
 	}
 	if !audit.has("granted", "for 1h0m0s, by test") || !audit.has("refused", "left out of the grant, by test") {
 		t.Error("the partial grant was not audited")
+	}
+}
+
+func TestRefusalCarriesWhatTheApproverSaid(t *testing.T) {
+	g, c, _, audit := newTestGrants()
+	a := Principal{ID: "agent-a"}
+
+	id := requestID(t, g.Authorize(a, "svc", nil))
+	if err := g.DecideWhy(id, 0, "test", nil, nil, "  ask for\nthe repository scope  "); err != nil {
+		t.Fatal(err)
+	}
+	err := g.Authorize(a, "svc", nil)
+	var ae *ApprovalError
+	if !errors.As(err, &ae) || ae.Refusal != "ask for the repository scope" {
+		t.Fatalf("after refusal: %#v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, `(the approver said: "ask for the repository scope")`) || !strings.Contains(msg, "accepted after") {
+		t.Fatalf("message %q", msg)
+	}
+	if !audit.has("refused", `by test: "ask for the repository scope"`) {
+		t.Error("the text was not audited")
+	}
+	// The text goes with the cooldown.
+	c.advance(10 * time.Minute)
+	id = requestID(t, g.Authorize(a, "svc", nil))
+	if err := g.Decide(id, 0, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Authorize(a, "svc", nil); !errors.As(err, &ae) || ae.Refusal != "" {
+		t.Fatalf("a refusal without text kept the old one: %v", err)
+	}
+}
+
+func TestPartialGrantTellsTheRefusedWhy(t *testing.T) {
+	g, _, _, _ := newTestGrants()
+	a := Principal{ID: "agent-a"}
+	id, err := g.Request(a, []string{"one", "two"}, nil, 0, nil)
+	if err != nil || id == "" {
+		t.Fatalf("request: %q %v", id, err)
+	}
+	if err := g.DecideWhy(id, time.Hour, "test", nil, []string{"one"}, strings.Repeat("é", 400)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Authorize(a, "one", nil); err != nil {
+		t.Fatalf("granted one: %v", err)
+	}
+	var ae *ApprovalError
+	if err := g.Authorize(a, "two", nil); !errors.As(err, &ae) || len(ae.Refusal) > maxRefusal || !utf8.ValidString(ae.Refusal) || ae.Refusal == "" {
+		t.Fatalf("refused two: %v", err)
 	}
 }

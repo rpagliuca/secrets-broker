@@ -198,11 +198,22 @@ secrets-broker pending
 secrets-broker approve 3f9a1c22 1h
 secrets-broker approve 3f9a1c22 1h -only name-a,name-b   # part of it; the rest is refused
 secrets-broker deny 3f9a1c22
+secrets-broker deny 3f9a1c22 ask for the repository scope   # the client reads the text
+secrets-broker approve 3f9a1c22 1h -only name-a -why too broad for this task
 secrets-broker grants
 secrets-broker revoke agent-1      # or: revoke all
 secrets-broker blocked             # clients kept from asking again after a refusal
 secrets-broker unblock agent-1     # or: unblock all; lets them ask again, grants nothing
 ```
+
+The text after `deny ID`, or after `-why`, goes with the cooldown of the
+refused credentials: the client reads it in the refusal of its next request
+(`not approved (the approver said: "..."); a new request is accepted after
+...`), and the audit log records it. It is cut to 300 bytes.
+
+When the broker stops, the waiting requests end and the notifier takes the
+questions off the approver's devices (up to 15 seconds); a request made
+while the store is sealed is delivered after the unseal.
 
 A deployment can deliver the request somewhere else, such as a phone, by
 implementing `broker.Notifier` and calling `Grants.Decide` with the answer.

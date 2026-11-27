@@ -71,7 +71,17 @@ func (n *Notifier) Notify(ctx context.Context, g *broker.Grants, req broker.Requ
 }
 
 func (n *Notifier) ask(ctx context.Context, g *broker.Grants, req broker.Request) error {
+	// A request made while the store is sealed waits for the unseal, and
+	// then the approver is asked: otherwise it would wait unseen.
 	key, err := n.key()
+	for errors.Is(err, broker.ErrSealed) {
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(sealedRetry):
+		}
+		key, err = n.key()
+	}
 	if err != nil {
 		return err
 	}
@@ -215,6 +225,8 @@ func transient(err error) bool {
 // attempt after a transient failure. Variables so that tests can shorten them.
 var (
 	sendTimeout = 15 * time.Second
+	// sealedRetry is how often a request made while sealed checks for the unseal.
+	sealedRetry = 15 * time.Second
 	retryDelay  = 5 * time.Second
 )
 
@@ -282,7 +294,9 @@ func (n *Notifier) expired(key string, req broker.Request, source string) {
 func (n *Notifier) retract(key, collapseID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, nil)
+	if err := n.call(ctx, key, http.MethodPost, "/notifications/retract", map[string]string{"collapse_id": collapseID}, nil); err != nil {
+		log.Printf("pushward: request %s: retract: %v", collapseID, err)
+	}
 }
 
 // key fetches the integration key and enforces its host binding.
