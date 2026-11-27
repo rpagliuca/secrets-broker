@@ -89,6 +89,8 @@ type Grant struct {
 	// Reason is why the client said it wanted the credential, in the
 	// request that was granted: the client's own, unverified words.
 	Reason string `json:"reason,omitempty"`
+	// LastUse is the last use the grant allowed; nil before the first.
+	LastUse *time.Time `json:"last_use,omitempty"`
 }
 
 // ApprovalError is why a client without a grant was refused.
@@ -222,6 +224,7 @@ type grantEntry struct {
 	pending      string    // id of the waiting request
 	name         string    // of the principal, in the request that was granted
 	reason       string    // of the client, in the request that was granted
+	lastUse      time.Time // last use authorized under the grant in force
 }
 
 type pendingRequest struct {
@@ -272,6 +275,7 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 	}
 	switch {
 	case now.Before(e.until):
+		e.lastUse = now
 		return nil
 	case e.pending != "":
 		return &ApprovalError{RequestID: e.pending}
@@ -498,7 +502,7 @@ func (g *Grants) DecideWhy(id string, d time.Duration, by string, codes map[stri
 			if limit := limits[c]; !limit.IsZero() && limit.Before(e.until) {
 				e.until = limit
 			}
-			e.name, e.reason = req.Principal.Name, req.Reasons[c]
+			e.name, e.reason, e.lastUse = req.Principal.Name, req.Reasons[c], time.Time{}
 		}
 	}
 	said := ""
@@ -622,7 +626,12 @@ func (g *Grants) Active() []Grant {
 	var out []Grant
 	for key, e := range g.entries {
 		if now.Before(e.until) {
-			out = append(out, Grant{Principal: key.principal, Credential: key.credential, Until: e.until.UTC(), Name: e.name, Reason: e.reason})
+			gr := Grant{Principal: key.principal, Credential: key.credential, Until: e.until.UTC(), Name: e.name, Reason: e.reason}
+			if !e.lastUse.IsZero() {
+				t := e.lastUse.UTC()
+				gr.LastUse = &t
+			}
+			out = append(out, gr)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Until.Before(out[j].Until) })

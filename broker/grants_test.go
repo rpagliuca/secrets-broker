@@ -483,3 +483,26 @@ func TestPartialGrantTellsTheRefusedWhy(t *testing.T) {
 		t.Fatalf("refused two: %v", err)
 	}
 }
+
+// Each grant tells when it was last used: never right after it is given,
+// then the time of the last use it allowed.
+func TestGrantTellsTheLastUse(t *testing.T) {
+	g, c, _, _ := newTestGrants()
+	a := Principal{ID: "agent-a"}
+	id := requestID(t, g.Authorize(a, "svc", nil))
+	if err := g.Decide(id, time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.Active(); len(got) != 1 || got[0].LastUse != nil {
+		t.Fatalf("before any use: %+v", got)
+	}
+	c.advance(5 * time.Minute)
+	if err := g.Authorize(a, "svc", nil); err != nil {
+		t.Fatal(err)
+	}
+	used := c.now()
+	c.advance(time.Minute)
+	if got := g.Active(); len(got) != 1 || got[0].LastUse == nil || !got[0].LastUse.Equal(used) {
+		t.Fatalf("after a use: %+v", got)
+	}
+}
