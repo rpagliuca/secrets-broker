@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,7 @@ type Grant struct {
 type ApprovalError struct {
 	RequestID string    // set while a request is waiting for an answer
 	Until     time.Time // set while new requests are not accepted
+	Refusal   string    // what the approver said when refusing, if anything
 }
 
 func (e *ApprovalError) Error() string {
@@ -100,7 +102,11 @@ func (e *ApprovalError) Error() string {
 		return "waiting for approval (request " + e.RequestID + "); retry after it is approved"
 	}
 	if !e.Until.IsZero() {
-		return "not approved; a new request is accepted after " + e.Until.UTC().Format(time.RFC3339)
+		said := ""
+		if e.Refusal != "" {
+			said = " (the approver said: " + strconv.Quote(e.Refusal) + ")"
+		}
+		return "not approved" + said + "; a new request is accepted after " + e.Until.UTC().Format(time.RFC3339)
 	}
 	return "not approved; too many requests are waiting"
 }
@@ -207,6 +213,7 @@ type grantKey struct{ principal, credential string }
 type grantEntry struct {
 	until        time.Time // the grant, when in the future
 	blockedUntil time.Time // no new request before this
+	refusal      string    // what the approver said when refusing
 	pending      string    // id of the waiting request
 	name         string    // of the principal, in the request that was granted
 	reason       string    // of the client, in the request that was granted
@@ -264,7 +271,7 @@ func (g *Grants) Authorize(p Principal, credential string, hosts []string) error
 	case e.pending != "":
 		return &ApprovalError{RequestID: e.pending}
 	case now.Before(e.blockedUntil):
-		return &ApprovalError{Until: e.blockedUntil}
+		return &ApprovalError{Until: e.blockedUntil, Refusal: e.refusal}
 	case len(g.pending) >= maxPending:
 		return &ApprovalError{}
 	}
@@ -395,6 +402,21 @@ func (g *Grants) DecideWith(id string, d time.Duration, by string, codes map[str
 // refused, each with its cooldown. An empty only means the whole request.
 // A name that is not in the request is an error and leaves it waiting.
 func (g *Grants) DecideSome(id string, d time.Duration, by string, codes map[string]string, only []string) error {
+	return g.DecideWhy(id, d, by, codes, only, "")
+}
+
+// maxRefusal bounds what the approver may say to the client when refusing.
+const maxRefusal = 300
+
+// DecideWhy is DecideSome with what the approver says about the refused
+// credentials, if any: the client reads it in the refusal of its next
+// request, until the cooldown ends. It is the approver's text, passed on
+// as is; it is cut to maxRefusal bytes and kept on one line.
+func (g *Grants) DecideWhy(id string, d time.Duration, by string, codes map[string]string, only []string, why string) error {
+	why = strings.Join(strings.Fields(why), " ")
+	if len(why) > maxRefusal {
+		why = strings.ToValidUTF8(why[:maxRefusal], "")
+	}
 	if d < 0 || d > maxGrant {
 		return fmt.Errorf("duration must be between 0 and %s", maxGrant)
 	}
@@ -454,7 +476,7 @@ func (g *Grants) DecideSome(id string, d time.Duration, by string, codes map[str
 	for _, c := range req.Credentials {
 		e := g.entries[grantKey{req.Principal.ID, c}]
 		if d == 0 || len(only) > 0 && d > 0 && !slices.Contains(only, c) {
-			e.blockedUntil = now.Add(g.cooldown)
+			e.blockedUntil, e.refusal = now.Add(g.cooldown), why
 			refused.Credentials = append(refused.Credentials, c)
 		} else {
 			granted.Credentials = append(granted.Credentials, c)
@@ -465,12 +487,16 @@ func (g *Grants) DecideSome(id string, d time.Duration, by string, codes map[str
 			e.name, e.reason = req.Principal.Name, req.Reasons[c]
 		}
 	}
+	said := ""
+	if why != "" {
+		said = ": " + strconv.Quote(why)
+	}
 	if d == 0 {
-		g.record(req.Request, "refused", "by "+by)
+		g.record(req.Request, "refused", "by "+by+said)
 		return nil
 	}
 	g.record(granted, "granted", fmt.Sprintf("for %s, by %s", d, by))
-	g.record(refused, "refused", "left out of the grant, by "+by)
+	g.record(refused, "refused", "left out of the grant, by "+by+said)
 	return nil
 }
 
@@ -537,7 +563,7 @@ func (g *Grants) Unblock(principal, by string) int {
 		if (principal != "all" && key.principal != principal) || !now.Before(e.blockedUntil) {
 			continue
 		}
-		e.blockedUntil = time.Time{}
+		e.blockedUntil, e.refusal = time.Time{}, ""
 		n++
 		g.audit.Record(Event{Time: now.UTC(), Decision: "unblocked", Reason: "by " + by, Principal: key.principal, Credential: key.credential})
 	}
