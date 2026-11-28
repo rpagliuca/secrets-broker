@@ -35,6 +35,10 @@ type fake struct {
 	retracted string
 	lose      int // replies to "send" to drop after receiving the notification
 	sends     int
+	// refuseRetract answers that many retracts with this status first.
+	refuseRetract       int
+	refuseRetractStatus int
+	retracts            int
 }
 
 func newFake(t *testing.T) *fake {
@@ -67,6 +71,13 @@ func newFake(t *testing.T) *fake {
 			}
 			io.WriteString(w, `{"notification_id":1234,"status":"answered","action_id":"`+f.answer+`"}`)
 		case r.Method == "POST" && r.URL.Path == "/notifications/retract":
+			f.retracts++
+			if f.refuseRetract > 0 {
+				f.refuseRetract--
+				w.WriteHeader(f.refuseRetractStatus)
+				io.WriteString(w, `{"error":"slow down"}`)
+				return
+			}
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
 			f.retracted = body["collapse_id"]
@@ -348,4 +359,33 @@ func TestRequestMadeWhileSealedIsSentAfterTheUnseal(t *testing.T) {
 	s.mu.Unlock()
 	waitFor(t, "the notification after the unseal", func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.sends == 1 })
 	g.Close(time.Second)
+}
+
+// A retract refused for the rate limit is tried again; one refused for good
+// is not.
+func TestRetractIsTriedAgainAfterATransientFailure(t *testing.T) {
+	old := retractDelays
+	retractDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { retractDelays = old })
+
+	f := newFake(t)
+	f.refuseRetract, f.refuseRetractStatus = 2, http.StatusTooManyRequests
+	f.notifier().retract("hlk_test_key", "req-1")
+	if f.retracted != "req-1" || f.retracts != 3 {
+		t.Fatalf("retracted %q after %d calls", f.retracted, f.retracts)
+	}
+
+	f = newFake(t)
+	f.refuseRetract, f.refuseRetractStatus = 5, http.StatusTooManyRequests
+	f.notifier().retract("hlk_test_key", "req-2")
+	if f.retracted != "" || f.retracts != 1+len(retractDelays) {
+		t.Fatalf("gave up after %d calls, retracted %q", f.retracts, f.retracted)
+	}
+
+	f = newFake(t)
+	f.refuseRetract, f.refuseRetractStatus = 1, http.StatusForbidden
+	f.notifier().retract("hlk_test_key", "req-3")
+	if f.retracts != 1 {
+		t.Fatalf("a permanent refusal was tried %d times", f.retracts)
+	}
 }
